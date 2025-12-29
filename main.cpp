@@ -31,10 +31,11 @@ void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
 
 struct DeclLoc {
   DeclLoc() = default;
-  DeclLoc(std::string Filename, unsigned Line)
-      : Filename(std::move(Filename)), Line(Line) {}
+  DeclLoc(std::string Filename, unsigned startLine, unsigned endLine)
+      : Filename(std::move(Filename)), StartLine(startLine), EndLine(endLine){}
   SmallString<128> Filename;
-  unsigned Line;
+  unsigned StartLine;
+  unsigned EndLine;
 };
 
 struct DefInfo {
@@ -42,7 +43,8 @@ struct DefInfo {
   size_t Uses;
   std::string Name;
   std::string Filename;
-  unsigned Line;
+  unsigned StartLine;
+  unsigned EndLine;
   std::vector<DeclLoc> Declarations;
 };
 
@@ -67,7 +69,8 @@ std::vector<DeclLoc> getDeclarations(const FunctionDecl *F,
     if (R->doesThisDeclarationHaveABody())
       continue;
     auto Begin = R->getSourceRange().getBegin();
-    Decls.emplace_back(SM.getFilename(Begin).str(), SM.getSpellingLineNumber(Begin));
+    auto End = R->getSourceRange().getEnd();
+    Decls.emplace_back(SM.getFilename(Begin).str(), SM.getSpellingLineNumber(Begin), SM.getSpellingLineNumber(End));
     SM.getFileManager().makeAbsolutePath(Decls.back().Filename);
   }
   return Decls;
@@ -92,8 +95,10 @@ public:
       it_inserted.first->second.Name = F->getQualifiedNameAsString();
 
       auto Begin = F->getSourceRange().getBegin();
+      auto End = F->getSourceRange().getEnd();
       it_inserted.first->second.Filename = SM.getFilename(Begin);
-      it_inserted.first->second.Line = SM.getSpellingLineNumber(Begin);
+      it_inserted.first->second.StartLine = SM.getSpellingLineNumber(Begin);
+      it_inserted.first->second.EndLine = SM.getSpellingLineNumber(End);
 
       it_inserted.first->second.Declarations = getDeclarations(F, SM);
 
@@ -283,10 +288,10 @@ int main(int argc, const char **argv) {
   for (auto &KV : AllDecls) {
     DefInfo &I = KV.second;
     if (I.Definitions > 0 && I.Uses == 0) {
-      llvm::errs() << I.Filename << ":" << I.Line << ": warning:"
+      llvm::errs() << I.Filename << ":" << I.StartLine << ':' << I.EndLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
       for (auto &D : I.Declarations) {
-        llvm::errs() << D.Filename << ":" << D.Line << ": note:"
+        llvm::errs() << D.Filename << ":" << D.StartLine << ':' << D.EndLine << ": note:"
                      << " declared here\n";
       }
     }
