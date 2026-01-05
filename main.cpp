@@ -39,13 +39,14 @@ struct DeclLoc {
 };
 
 struct DefInfo {
-  size_t Definitions;
+  bool declaredOrDefined() const { return Declarations.size() || Definitions.size(); }
   size_t Uses;
   std::string Name;
   std::string Filename;
   unsigned StartLine;
   unsigned EndLine;
   std::vector<DeclLoc> Declarations;
+  std::vector<DeclLoc> Definitions;
 };
 
 std::mutex Mutex;
@@ -76,6 +77,21 @@ std::vector<DeclLoc> getDeclarations(const FunctionDecl *F,
   return Decls;
 }
 
+/// returns all definitions of F
+std::vector<DeclLoc> getDefinitions(const FunctionDecl *F,
+                                     const SourceManager &SM) {
+  std::vector<DeclLoc> Definitions;
+  for (const FunctionDecl *R : F->redecls()) {
+    if (!R->doesThisDeclarationHaveABody())
+      continue;
+    auto Begin = R->getSourceRange().getBegin();
+    auto End = R->getSourceRange().getEnd();
+    Definitions.emplace_back(SM.getFilename(Begin).str(), SM.getSpellingLineNumber(Begin), SM.getSpellingLineNumber(End));
+    SM.getFileManager().makeAbsolutePath(Definitions.back().Filename);
+  }
+  return Definitions;
+}
+
 class FunctionDeclMatchHandler : public MatchFinder::MatchCallback {
 public:
   void finalize(const SourceManager &SM) {
@@ -88,10 +104,7 @@ public:
 
       const auto F = declaration->getDefinition();
       assert(F);
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{1, 0});
-      if (!it_inserted.second) {
-        it_inserted.first->second.Definitions++;
-      }
+      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{0});
       it_inserted.first->second.Name = F->getQualifiedNameAsString();
 
       auto Begin = F->getSourceRange().getBegin();
@@ -100,8 +113,12 @@ public:
       it_inserted.first->second.StartLine = SM.getSpellingLineNumber(Begin);
       it_inserted.first->second.EndLine = SM.getSpellingLineNumber(End);
 
-      it_inserted.first->second.Declarations = getDeclarations(F, SM);
+      const auto declarations = getDeclarations(F, SM);
+      it_inserted.first->second.Declarations.insert(it_inserted.first->second.Declarations.begin(), declarations.begin(), declarations.end());
+      const auto definitions = getDefinitions(F, SM);
+      it_inserted.first->second.Definitions.insert(it_inserted.first->second.Definitions.begin(), definitions.begin(), definitions.end());
 
+   //    llvm::errs() << "decls: " << declarations.size() << " defs: " << definitions.size() << "\n";
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
       //    " uses: " << it_inserted.first->second.Uses << "\n";
@@ -111,7 +128,7 @@ public:
       std::string USR;
       if (!getUSRForDecl(F, USR))
         continue;
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{0, 1});
+      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{1});
       if (!it_inserted.second) {
         it_inserted.first->second.Uses++;
       }
@@ -287,12 +304,20 @@ int main(int argc, const char **argv) {
 
   for (auto &KV : AllDecls) {
     DefInfo &I = KV.second;
-    if (I.Definitions > 0 && I.Uses == 0) {
-      llvm::errs() << I.Filename << ":" << I.StartLine << ':' << I.EndLine << ": warning:"
+    if (I.declaredOrDefined() && I.Uses == 0) {
+      llvm::errs() << I.Filename << ":" << I.StartLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
       for (auto &D : I.Declarations) {
-        llvm::errs() << D.Filename << ":" << D.StartLine << ':' << D.EndLine << ": note:"
+        llvm::errs() << D.Filename << ":" << D.StartLine << ": note:"
                      << " declared here\n";
+        llvm::errs() << D.Filename << ":" << D.EndLine << ": note:"
+                     << " declaration ends here\n";
+      }
+      for (auto &D : I.Definitions) {
+        llvm::errs() << D.Filename << ":" << D.StartLine << ": note:"
+                     << " defined here\n";
+        llvm::errs() << D.Filename << ":" << D.EndLine << ": note:"
+                     << " definition ends here\n";
       }
     }
   }
