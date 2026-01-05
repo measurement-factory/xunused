@@ -77,6 +77,7 @@ std::vector<DeclLoc> getDeclarations(const FunctionDecl *F,
   return Decls;
 }
 
+// TODO: fix code duplication by merging with getDeclarations()
 /// returns all definitions of F
 std::vector<DeclLoc> getDefinitions(const FunctionDecl *F,
                                      const SourceManager &SM) {
@@ -118,7 +119,6 @@ public:
       const auto definitions = getDefinitions(F, SM);
       it_inserted.first->second.Definitions.insert(it_inserted.first->second.Definitions.begin(), definitions.begin(), definitions.end());
 
-   //    llvm::errs() << "decls: " << declarations.size() << " defs: " << definitions.size() << "\n";
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
       //    " uses: " << it_inserted.first->second.Uses << "\n";
