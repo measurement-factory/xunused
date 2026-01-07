@@ -31,20 +31,35 @@ void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
 
 struct DeclLoc {
   DeclLoc() = default;
-  DeclLoc(std::string Filename, unsigned startLine, unsigned endLine)
-      : Filename(std::move(Filename)), StartLine(startLine), EndLine(endLine){}
-  SmallString<128> Filename;
+  DeclLoc(const FunctionDecl *F, const SourceManager &SM) {
+    auto Begin = F->getSourceRange().getBegin();
+    auto End = F->getSourceRange().getEnd();
+    llvm::SmallString<128> fileName(SM.getFilename(Begin));
+    SM.getFileManager().makeAbsolutePath(fileName);
+    Filename = SM.getFilename(Begin);
+    StartLine = SM.getSpellingLineNumber(Begin);
+    EndLine = SM.getSpellingLineNumber(End);
+  }
+  std::string Filename;
   unsigned StartLine;
   unsigned EndLine;
 };
 
 struct DefInfo {
-  bool declaredOrDefined() const { return Declarations.size() || Definitions.size(); }
+  explicit DefInfo(const size_t uses) : Uses(uses) {}
+  DefInfo(const size_t uses, const FunctionDecl *F, const SourceManager &SM)
+      : Uses(uses), Name(F->getQualifiedNameAsString()), DefLocaction(F, SM) {}
+
+  bool defined() const { return !DefLocaction.Filename.empty(); }
+  void addDeclarationsAndDefinitions(const FunctionDecl *F, const SourceManager &SM) {
+    for (const FunctionDecl *R : F->redecls()) {
+      auto &destination = R->doesThisDeclarationHaveABody() ? Definitions : Declarations;
+      destination.emplace_back(R, SM);
+    }
+  }
   size_t Uses;
   std::string Name;
-  std::string Filename;
-  unsigned StartLine;
-  unsigned EndLine;
+  DeclLoc DefLocaction;
   std::vector<DeclLoc> Declarations;
   std::vector<DeclLoc> Definitions;
 };
@@ -62,37 +77,6 @@ bool getUSRForDecl(const Decl *Decl, std::string &USR) {
   return true;
 }
 
-/// Returns all declarations that are not the definition of F
-std::vector<DeclLoc> getDeclarations(const FunctionDecl *F,
-                                     const SourceManager &SM) {
-  std::vector<DeclLoc> Decls;
-  for (const FunctionDecl *R : F->redecls()) {
-    if (R->doesThisDeclarationHaveABody())
-      continue;
-    auto Begin = R->getSourceRange().getBegin();
-    auto End = R->getSourceRange().getEnd();
-    Decls.emplace_back(SM.getFilename(Begin).str(), SM.getSpellingLineNumber(Begin), SM.getSpellingLineNumber(End));
-    SM.getFileManager().makeAbsolutePath(Decls.back().Filename);
-  }
-  return Decls;
-}
-
-// TODO: fix code duplication by merging with getDeclarations()
-/// returns all definitions of F
-std::vector<DeclLoc> getDefinitions(const FunctionDecl *F,
-                                     const SourceManager &SM) {
-  std::vector<DeclLoc> Definitions;
-  for (const FunctionDecl *R : F->redecls()) {
-    if (!R->doesThisDeclarationHaveABody())
-      continue;
-    auto Begin = R->getSourceRange().getBegin();
-    auto End = R->getSourceRange().getEnd();
-    Definitions.emplace_back(SM.getFilename(Begin).str(), SM.getSpellingLineNumber(Begin), SM.getSpellingLineNumber(End));
-    SM.getFileManager().makeAbsolutePath(Definitions.back().Filename);
-  }
-  return Definitions;
-}
-
 class FunctionDeclMatchHandler : public MatchFinder::MatchCallback {
 public:
   void finalize(const SourceManager &SM) {
@@ -105,19 +89,13 @@ public:
 
       const auto F = declaration->getDefinition();
       assert(F);
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{0});
-      it_inserted.first->second.Name = F->getQualifiedNameAsString();
-
-      auto Begin = F->getSourceRange().getBegin();
-      auto End = F->getSourceRange().getEnd();
-      it_inserted.first->second.Filename = SM.getFilename(Begin);
-      it_inserted.first->second.StartLine = SM.getSpellingLineNumber(Begin);
-      it_inserted.first->second.EndLine = SM.getSpellingLineNumber(End);
-
-      const auto declarations = getDeclarations(F, SM);
-      it_inserted.first->second.Declarations.insert(it_inserted.first->second.Declarations.begin(), declarations.begin(), declarations.end());
-      const auto definitions = getDefinitions(F, SM);
-      it_inserted.first->second.Definitions.insert(it_inserted.first->second.Definitions.begin(), definitions.begin(), definitions.end());
+      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(0, F, SM));
+      auto &defInfo = it_inserted.first->second;
+      if (!defInfo.defined()) {
+        defInfo.Name = F->getQualifiedNameAsString();
+        defInfo.DefLocaction = DeclLoc(F, SM);
+      }
+      defInfo.addDeclarationsAndDefinitions(F, SM);
 
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
@@ -128,7 +106,7 @@ public:
       std::string USR;
       if (!getUSRForDecl(F, USR))
         continue;
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{1});
+      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(1));
       if (!it_inserted.second) {
         it_inserted.first->second.Uses++;
       }
@@ -304,8 +282,8 @@ int main(int argc, const char **argv) {
 
   for (auto &KV : AllDecls) {
     DefInfo &I = KV.second;
-    if (I.declaredOrDefined() && I.Uses == 0) {
-      llvm::errs() << I.Filename << ":" << I.StartLine << ": warning:"
+    if (I.defined() && I.Uses == 0) {
+      llvm::errs() << I.DefLocaction.Filename << ":" << I.DefLocaction.StartLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
       for (auto &D : I.Declarations) {
         llvm::errs() << D.Filename << ":" << D.StartLine << ": note:"

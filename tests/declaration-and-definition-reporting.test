@@ -9,20 +9,19 @@
 // CHECK-DAG: {{.*}}Function 'F' is unused
 // CHECK-DAG: source1.cc:2:{{.*}}defined here
 // CHECK-DAG: source1.cc:4:{{.*}}definition ends here
-// CHECK-DAG: source2.cc:2:{{.*}}declared here
-// CHECK-DAG: source2.cc:2:{{.*}}declaration ends here
-// CHECK-DAG: source2.cc:3:{{.*}}defined here
-// CHECK-DAG: source2.cc:5:{{.*}}definition ends here
+// CHECK-DAG: source2.cc:1:{{.*}}declared here
+// CHECK-DAG: source2.cc:1:{{.*}}declaration ends here
+// CHECK-DAG: source2.cc:2:{{.*}}defined here
+// CHECK-DAG: source2.cc:4:{{.*}}definition ends here
 
 //--- source1.cc
-#include <iostream>
+// no "extern" declaration for F() in this source file
 int F() {
     return 0;
 }
 int main() { return 0; }
 
 //--- source2.cc
-#include <iostream>
 extern int F();
 int F() {
     return 0;
