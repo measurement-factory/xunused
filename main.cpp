@@ -48,9 +48,9 @@ struct DeclLoc {
 struct DefInfo {
   explicit DefInfo(const size_t uses) : Uses(uses) {}
   DefInfo(const size_t uses, const FunctionDecl *F, const SourceManager &SM)
-      : Uses(uses), Name(F->getQualifiedNameAsString()), DefLocaction(F, SM) {}
+      : Uses(uses), Name(F->getQualifiedNameAsString()) {}
 
-  bool defined() const { return !DefLocaction.Filename.empty(); }
+  bool defined() const { return !Definitions.empty(); }
   void addDeclarationsAndDefinitions(const FunctionDecl *F, const SourceManager &SM) {
     for (const FunctionDecl *R : F->redecls()) {
       auto &destination = R->doesThisDeclarationHaveABody() ? Definitions : Declarations;
@@ -59,7 +59,6 @@ struct DefInfo {
   }
   size_t Uses;
   std::string Name;
-  DeclLoc DefLocaction;
   std::vector<DeclLoc> Declarations;
   std::vector<DeclLoc> Definitions;
 };
@@ -91,11 +90,7 @@ public:
       assert(F);
       auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(0, F, SM));
       auto &defInfo = it_inserted.first->second;
-      if (!defInfo.defined()) {
-        defInfo.Name = F->getQualifiedNameAsString();
-        defInfo.DefLocaction = DeclLoc(F, SM);
-      }
-      defInfo.addDeclarationsAndDefinitions(F, SM);
+      it_inserted.first->second.addDeclarationsAndDefinitions(F, SM);
 
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
@@ -283,7 +278,7 @@ int main(int argc, const char **argv) {
   for (auto &KV : AllDecls) {
     DefInfo &I = KV.second;
     if (I.defined() && I.Uses == 0) {
-      llvm::errs() << I.DefLocaction.Filename << ":" << I.DefLocaction.StartLine << ": warning:"
+      llvm::errs() << I.Definitions[0].Filename << ":" << I.Definitions[0].StartLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
       for (auto &D : I.Declarations) {
         llvm::errs() << D.Filename << ":" << D.StartLine << ": note:"
