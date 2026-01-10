@@ -279,7 +279,8 @@ int main(int argc, const char **argv) {
   for (auto &KV : AllDecls) {
     DefInfo &I = KV.second;
     if (I.sawDefinition() && I.Uses == 0) {
-      llvm::errs() << I.Definitions[0].Filename << ":" << I.Definitions[0].StartLine << ": warning:"
+      const auto &reportDefinition = I.Definitions.back();
+      llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.StartLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
       for (auto &D : I.Declarations) {
         llvm::errs() << D.Filename << ":" << D.StartLine << ": note:"
