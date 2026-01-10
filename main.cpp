@@ -46,14 +46,16 @@ struct DeclLoc {
 
 struct DefInfo {
   explicit DefInfo(const size_t uses) : Uses(uses) {}
-  DefInfo(const size_t uses, const FunctionDecl *F, const SourceManager &SM)
-      : Uses(uses), Name(F->getQualifiedNameAsString()) {}
+  // Use this constructor when you find a use of a never-seen-before function
+  DefInfo(const FunctionDecl *F, const SourceManager &SM)
+    : Uses(0), Name(F->getQualifiedNameAsString()) {
+  }
 
-  bool defined() const { return !Definitions.empty(); }
+  bool sawDefinition() const { return !Definitions.empty(); }
   void addDeclarationsAndDefinitions(const FunctionDecl *F, const SourceManager &SM) {
     for (const FunctionDecl *R : F->redecls()) {
-      auto &destination = R->doesThisDeclarationHaveABody() ? Definitions : Declarations;
-      destination.emplace_back(R, SM);
+      auto &ds = R->doesThisDeclarationHaveABody() ? Definitions : Declarations;
+      ds.emplace_back(R, SM);
     }
   }
   size_t Uses;
@@ -87,7 +89,7 @@ public:
 
       const auto F = declaration->getDefinition();
       assert(F);
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(0, F, SM));
+      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(F, SM));
       auto &defInfo = it_inserted.first->second;
       it_inserted.first->second.addDeclarationsAndDefinitions(F, SM);
 
@@ -276,7 +278,7 @@ int main(int argc, const char **argv) {
 
   for (auto &KV : AllDecls) {
     DefInfo &I = KV.second;
-    if (I.defined() && I.Uses == 0) {
+    if (I.sawDefinition() && I.Uses == 0) {
       llvm::errs() << I.Definitions[0].Filename << ":" << I.Definitions[0].StartLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
       for (auto &D : I.Declarations) {
