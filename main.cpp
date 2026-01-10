@@ -34,13 +34,12 @@ struct DeclLoc {
   DeclLoc(const FunctionDecl *F, const SourceManager &SM) {
     auto Begin = F->getSourceRange().getBegin();
     auto End = F->getSourceRange().getEnd();
-    llvm::SmallString<128> fileName(SM.getFilename(Begin));
-    SM.getFileManager().makeAbsolutePath(fileName);
     Filename = SM.getFilename(Begin);
+    SM.getFileManager().makeAbsolutePath(Filename);
     StartLine = SM.getSpellingLineNumber(Begin);
     EndLine = SM.getSpellingLineNumber(End);
   }
-  std::string Filename;
+  SmallString<128> Filename;
   unsigned StartLine;
   unsigned EndLine;
 };
