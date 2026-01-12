@@ -32,8 +32,8 @@ void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
 struct DeclLoc {
   DeclLoc() = default;
   DeclLoc(const FunctionDecl *F, const SourceManager &SM) {
-    auto Begin = F->getSourceRange().getBegin();
-    auto End = F->getSourceRange().getEnd();
+    const auto Begin = F->getSourceRange().getBegin();
+    const auto End = F->getSourceRange().getEnd();
     Filename = SM.getFilename(Begin);
     SM.getFileManager().makeAbsolutePath(Filename);
     StartLine = SM.getSpellingLineNumber(Begin);
@@ -110,8 +110,8 @@ public:
 
       const auto F = declaration->getDefinition();
       assert(F);
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(F, SM));
-      auto &defInfo = it_inserted.first->second;
+      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(F, SM));
+      const auto &defInfo = it_inserted.first->second;
       it_inserted.first->second.addDeclarationsAndDefinitions(F, SM);
 
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
@@ -123,7 +123,7 @@ public:
       std::string USR;
       if (!getUSRForDecl(F, USR))
         continue;
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(1));
+      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(1));
       if (!it_inserted.second) {
         it_inserted.first->second.Uses++;
       }
