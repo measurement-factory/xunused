@@ -31,19 +31,39 @@ void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
 
 struct DeclLoc {
   DeclLoc() = default;
-  DeclLoc(std::string Filename, unsigned Line)
-      : Filename(std::move(Filename)), Line(Line) {}
+  DeclLoc(const FunctionDecl *F, const SourceManager &SM) {
+    const auto Begin = F->getSourceRange().getBegin();
+    const auto End = F->getSourceRange().getEnd();
+    Filename = SM.getFilename(Begin);
+    SM.getFileManager().makeAbsolutePath(Filename);
+    FirstLine = SM.getSpellingLineNumber(Begin);
+    LastLine = SM.getSpellingLineNumber(End);
+  }
   SmallString<128> Filename;
-  unsigned Line;
+  unsigned FirstLine;
+  unsigned LastLine; // same as FirstLine for single-line code
 };
 
 struct DefInfo {
-  size_t Definitions;
+  // Use this constructor when you find a use of a never-seen-before function
+  explicit DefInfo(const size_t uses) : Uses(uses) {}
+
+  // Use this constructor when you find a declaration or a definition of a never-seen-before function
+  explicit DefInfo(const FunctionDecl * const F)
+    : Uses(0), Name(F->getQualifiedNameAsString()) {
+  }
+
+  bool sawDefinition() const { return !Definitions.empty(); }
+  void addDeclarationsAndDefinitions(const FunctionDecl *F, const SourceManager &SM) {
+    for (const FunctionDecl *R : F->redecls()) {
+      auto &ds = R->doesThisDeclarationHaveABody() ? Definitions : Declarations;
+      ds.emplace_back(R, SM);
+    }
+  }
   size_t Uses;
   std::string Name;
-  std::string Filename;
-  unsigned Line;
   std::vector<DeclLoc> Declarations;
+  std::vector<DeclLoc> Definitions;
 };
 
 std::mutex Mutex;
@@ -57,20 +77,6 @@ bool getUSRForDecl(const Decl *Decl, std::string &USR) {
 
   USR = std::string(Buff.data(), Buff.size());
   return true;
-}
-
-/// Returns all declarations that are not the definition of F
-std::vector<DeclLoc> getDeclarations(const FunctionDecl *F,
-                                     const SourceManager &SM) {
-  std::vector<DeclLoc> Decls;
-  for (const FunctionDecl *R : F->redecls()) {
-    if (R->doesThisDeclarationHaveABody())
-      continue;
-    auto Begin = R->getSourceRange().getBegin();
-    Decls.emplace_back(SM.getFilename(Begin).str(), SM.getSpellingLineNumber(Begin));
-    SM.getFileManager().makeAbsolutePath(Decls.back().Filename);
-  }
-  return Decls;
 }
 
 // Whether this is a compiler-generated function, including a method of a
@@ -106,17 +112,8 @@ public:
 
       const auto F = declaration->getDefinition();
       assert(F);
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{1, 0});
-      if (!it_inserted.second) {
-        it_inserted.first->second.Definitions++;
-      }
-      it_inserted.first->second.Name = F->getQualifiedNameAsString();
-
-      auto Begin = F->getSourceRange().getBegin();
-      it_inserted.first->second.Filename = SM.getFilename(Begin);
-      it_inserted.first->second.Line = SM.getSpellingLineNumber(Begin);
-
-      it_inserted.first->second.Declarations = getDeclarations(F, SM);
+      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(F));
+      it_inserted.first->second.addDeclarationsAndDefinitions(F, SM);
 
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
@@ -127,7 +124,7 @@ public:
       std::string USR;
       if (!getUSRForDecl(F, USR))
         continue;
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{0, 1});
+      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(1));
       if (!it_inserted.second) {
         it_inserted.first->second.Uses++;
       }
@@ -304,19 +301,32 @@ int main(int argc, const char **argv) {
   for (auto &KV : AllDecls) {
     DefInfo &I = KV.second;
 
-    if (!I.Definitions)
+    if (!I.sawDefinition())
         continue; // assume this function is external to the project being scanned
 
     if (I.Uses > 0 && !reportFunctions)
         continue; // a used function that does not need to be reported
 
+    const auto &reportDefinition = I.Definitions.back();
     if (I.Uses == 0) {
-      llvm::errs() << I.Filename << ":" << I.Line << ": warning: Function '" << I.Name << "' is unused\n";
+      llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
+                   << " Function '" << I.Name << "' is unused\n";
     } else {
       assert(reportFunctions);
-      llvm::errs() << I.Filename << ":" << I.Line << ": note: Function '" << I.Name << "' uses=" << I.Uses << "\n";
+      llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
+          ": note: Function '" << I.Name << "' uses=" << I.Uses << "\n";
     }
-    for (const auto &D : I.Declarations)
-      llvm::errs() << D.Filename << ":" << D.Line << ": note:" << " declared here\n";
+    for (auto &D : I.Declarations) {
+      llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
+                   << " declared here\n";
+      llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
+                   << " declaration ends here\n";
+    }
+    for (auto &D : I.Definitions) {
+      llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
+                   << " defined here\n";
+      llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
+                   << " definition ends here\n";
+    }
   }
 }
