@@ -36,18 +36,20 @@ struct DeclLoc {
     const auto End = F->getSourceRange().getEnd();
     Filename = SM.getFilename(Begin);
     SM.getFileManager().makeAbsolutePath(Filename);
-    StartLine = SM.getSpellingLineNumber(Begin);
-    EndLine = SM.getSpellingLineNumber(End);
+    FirstLine = SM.getSpellingLineNumber(Begin);
+    LastLine = SM.getSpellingLineNumber(End);
   }
   SmallString<128> Filename;
-  unsigned StartLine;
-  unsigned EndLine;
+  unsigned FirstLine;
+  unsigned LastLine; // same as FirstLine for single-line code
 };
 
 struct DefInfo {
-  explicit DefInfo(const size_t uses) : Uses(uses) {}
   // Use this constructor when you find a use of a never-seen-before function
-  DefInfo(const FunctionDecl *F, const SourceManager &SM)
+  explicit DefInfo(const size_t uses) : Uses(uses) {}
+
+  // Use this constructor when you find a declaration or a definition of a never-seen-before function
+  explicit DefInfo(const FunctionDecl * const F)
     : Uses(0), Name(F->getQualifiedNameAsString()) {
   }
 
@@ -110,8 +112,7 @@ public:
 
       const auto F = declaration->getDefinition();
       assert(F);
-      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(F, SM));
-      const auto &defInfo = it_inserted.first->second;
+      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(F));
       it_inserted.first->second.addDeclarationsAndDefinitions(F, SM);
 
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
@@ -305,18 +306,18 @@ int main(int argc, const char **argv) {
     DefInfo &I = KV.second;
     if (I.sawDefinition() && I.Uses == 0) {
       const auto &reportDefinition = I.Definitions.back();
-      llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.StartLine << ": warning:"
+      llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
       for (auto &D : I.Declarations) {
-        llvm::errs() << D.Filename << ":" << D.StartLine << ": note:"
+        llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
                      << " declared here\n";
-        llvm::errs() << D.Filename << ":" << D.EndLine << ": note:"
+        llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
                      << " declaration ends here\n";
       }
       for (auto &D : I.Definitions) {
-        llvm::errs() << D.Filename << ":" << D.StartLine << ": note:"
+        llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
                      << " defined here\n";
-        llvm::errs() << D.Filename << ":" << D.EndLine << ": note:"
+        llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
                      << " definition ends here\n";
       }
     }
