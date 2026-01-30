@@ -67,6 +67,8 @@ struct DefInfo {
 
   bool sawDefinition() const { return !Definitions.empty(); }
   void addDeclarationsAndDefinitions(const FunctionDecl *F, const SourceManager &SM) {
+    if (Name.empty())
+        Name = F->getQualifiedNameAsString();
     for (const FunctionDecl *R : F->redecls()) {
       auto &ds = R->doesThisDeclarationHaveABody() ? Definitions : Declarations;
       ds.insert({R, SM});
