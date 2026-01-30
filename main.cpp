@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <map>
+#include <unordered_set>
 
 
 using namespace clang;
@@ -39,9 +40,20 @@ struct DeclLoc {
     FirstLine = SM.getSpellingLineNumber(Begin);
     LastLine = SM.getSpellingLineNumber(End);
   }
+  bool operator==(const DeclLoc& other) const {
+    return Filename == other.Filename &&
+           FirstLine == other.FirstLine &&
+           LastLine == other.LastLine;
+  }
   SmallString<128> Filename;
   unsigned FirstLine;
   unsigned LastLine; // same as FirstLine for single-line code
+};
+
+struct DeclLocHash {
+    size_t operator()(const DeclLoc& fr) const {
+      return llvm::hash_combine(fr.Filename, fr.FirstLine, fr.LastLine);
+    }
 };
 
 struct DefInfo {
@@ -57,13 +69,13 @@ struct DefInfo {
   void addDeclarationsAndDefinitions(const FunctionDecl *F, const SourceManager &SM) {
     for (const FunctionDecl *R : F->redecls()) {
       auto &ds = R->doesThisDeclarationHaveABody() ? Definitions : Declarations;
-      ds.emplace_back(R, SM);
+      ds.insert({R, SM});
     }
   }
   size_t Uses;
   std::string Name;
-  std::vector<DeclLoc> Declarations;
-  std::vector<DeclLoc> Definitions;
+  std::unordered_set<DeclLoc, DeclLocHash> Declarations;
+  std::unordered_set<DeclLoc, DeclLocHash> Definitions;
 };
 
 std::mutex Mutex;
@@ -307,7 +319,7 @@ int main(int argc, const char **argv) {
     if (I.Uses > 0 && !reportFunctions)
         continue; // a used function that does not need to be reported
 
-    const auto &reportDefinition = I.Definitions.back();
+    const auto &reportDefinition = *I.Definitions.begin();
     if (I.Uses == 0) {
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
