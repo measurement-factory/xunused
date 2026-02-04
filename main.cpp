@@ -33,12 +33,25 @@ void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
 struct DeclLoc {
   DeclLoc() = default;
   DeclLoc(const FunctionDecl *F, const SourceManager &SM) {
-    const auto Begin = F->getSourceRange().getBegin();
-    const auto End = F->getSourceRange().getEnd();
-    Filename = SM.getFilename(Begin);
-    SM.getFileManager().makeAbsolutePath(Filename);
+    auto range = F->getSourceRange();
+
+    // expand to include 'template<...>' if it exists
+    if (clang::FunctionTemplateDecl *TD = F->getDescribedFunctionTemplate())
+        range = TD->getSourceRange();
+
+    // Resolve macros to the "File" level (where the macro is called, not
+    // where it is defined). Without that Begin and End may even point
+    // to different files!
+    const auto Begin = SM.getFileLoc(range.getBegin());
+    const auto End = SM.getFileLoc(range.getEnd());
+
     FirstLine = SM.getSpellingLineNumber(Begin);
     LastLine = SM.getSpellingLineNumber(End);
+    Filename = SM.getFilename(Begin).str();
+    assert(!Filename.empty());
+    SM.getFileManager().makeAbsolutePath(Filename);
+    // normalize paths
+    llvm::sys::path::remove_dots(Filename, true);
   }
   bool operator==(const DeclLoc& other) const {
     return Filename == other.Filename &&
@@ -70,6 +83,9 @@ struct DefInfo {
     if (Name.empty())
         Name = F->getQualifiedNameAsString();
     for (const FunctionDecl *R : F->redecls()) {
+      if (!R->getLocation().isValid()) {
+        continue; // no physical file representation
+      }
       auto &ds = R->doesThisDeclarationHaveABody() ? Definitions : Declarations;
       ds.insert({R, SM});
     }
