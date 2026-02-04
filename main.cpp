@@ -52,6 +52,20 @@ struct DeclLoc {
     SM.getFileManager().makeAbsolutePath(Filename);
     // normalize paths
     llvm::sys::path::remove_dots(Filename, true);
+
+    const auto &context = F->getASTContext();
+    if (const auto RC = context.getRawCommentForDeclNoCache(F)) {
+        clang::SourceRange cRange = RC->getSourceRange();
+
+        const auto cBegin = SM.getFileLoc(cRange.getBegin());
+        const auto cEnd = SM.getFileLoc(cRange.getEnd());
+
+        CommentFirstLine = SM.getSpellingLineNumber(cBegin);
+        CommentLastLine = SM.getSpellingLineNumber(cEnd);
+        assert(CommentFirstLine);
+        assert(CommentLastLine);
+        assert(CommentFirstLine <= CommentLastLine);
+    }
   }
   bool operator==(const DeclLoc& other) const {
     return Filename == other.Filename &&
@@ -59,8 +73,10 @@ struct DeclLoc {
            LastLine == other.LastLine;
   }
   SmallString<128> Filename;
-  unsigned FirstLine;
-  unsigned LastLine; // same as FirstLine for single-line code
+  unsigned FirstLine = 0;
+  unsigned LastLine = 0; // same as FirstLine for single-line code
+  unsigned CommentFirstLine = 0;
+  unsigned CommentLastLine = 0;
 };
 
 struct DeclLocHash {
@@ -319,9 +335,12 @@ int main(int argc, const char **argv) {
     llvm::errs() << llvm::toString(Executor.takeError()) << "\n";
     return 1;
   }
+
+  auto Adjuster = clang::tooling::getInsertArgumentAdjuster("-fparse-all-comments");
+
   auto Err =
       Executor->get()->execute(std::unique_ptr<XUnusedFrontendActionFactory>(
-          new XUnusedFrontendActionFactory()));
+          new XUnusedFrontendActionFactory()), Adjuster);
 
   if (Err) {
     llvm::errs() << llvm::toString(std::move(Err)) << "\n";
@@ -351,12 +370,24 @@ int main(int argc, const char **argv) {
                    << " declared here\n";
       llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
                    << " declaration ends here\n";
+      if (D.CommentFirstLine) {
+        llvm::errs() << D.Filename << ":" << D.CommentFirstLine << ": note:"
+                     << " comment starts here\n";
+        llvm::errs() << D.Filename << ":" << D.CommentLastLine << ": note:"
+                   << " comment ends here\n";
+      }
     }
     for (auto &D : I.Definitions) {
       llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
                    << " defined here\n";
       llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
                    << " definition ends here\n";
+      if (D.CommentFirstLine) {
+        llvm::errs() << D.Filename << ":" << D.CommentFirstLine << ": note:"
+                     << " comment starts here\n";
+        llvm::errs() << D.Filename << ":" << D.CommentLastLine << ": note:"
+                   << " comment ends here\n";
+      }
     }
   }
 }
