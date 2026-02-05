@@ -56,7 +56,6 @@ struct DeclLoc {
     const auto &context = F->getASTContext();
     if (const auto RC = context.getRawCommentForDeclNoCache(F)) {
         clang::SourceRange cRange = RC->getSourceRange();
-
         const auto cBegin = SM.getFileLoc(cRange.getBegin());
         const auto cEnd = SM.getFileLoc(cRange.getEnd());
 
@@ -65,6 +64,13 @@ struct DeclLoc {
         assert(CommentFirstLine);
         assert(CommentLastLine);
         assert(CommentFirstLine <= CommentLastLine);
+
+        // proximity check: function must follow the comment with no empty lines
+        // between them
+        if (FirstLine <= CommentLastLine || (FirstLine - CommentLastLine) > 1) {
+            CommentFirstLine = 0;
+            CommentLastLine = 0;
+        }
     }
   }
   bool operator==(const DeclLoc& other) const {
