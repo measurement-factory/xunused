@@ -172,13 +172,14 @@ public:
       //    " uses: " << it_inserted.first->second.Uses << "\n";
     }
 
-    for (const auto F: Uses) {
+    for (const auto pair: Uses) {
+      const auto F = pair.first;
       std::string USR;
       if (!getUSRForDecl(F, USR))
         continue;
-      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(1));
+      const auto it_inserted = AllDecls.emplace(std::move(USR), pair.second);
       if (!it_inserted.second) {
-        it_inserted.first->second.Uses++;
+        it_inserted.first->second.Uses += pair.second;
       }
       // llvm::errs() << "saw usage: " << F->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
@@ -209,7 +210,9 @@ public:
     //llvm::errs() << " USR:" << USR;
     llvm::errs() << "\n";
 #endif
-    Uses.insert(FD->getCanonicalDecl());
+     auto [it, inserted] = Uses.try_emplace(FD->getCanonicalDecl(), 1);
+     if (!inserted)
+         it->second++;
   }
   void run(const MatchFinder::MatchResult &Result) override {
     if (const auto *F = Result.Nodes.getNodeAs<FunctionDecl>("fnDecl")) {
@@ -283,7 +286,7 @@ public:
   }
 
   std::set<const FunctionDecl *> Defs;
-  std::set<const FunctionDecl *> Uses;
+  std::map<const FunctionDecl *, unsigned> Uses;
 };
 
 class XUnusedASTConsumer : public ASTConsumer {
