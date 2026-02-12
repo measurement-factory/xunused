@@ -9,7 +9,10 @@
 #include "clang/Index/USRGeneration.h"
 #include "clang/Tooling/AllTUsExecution.h"
 #include "clang/Tooling/Tooling.h"
+#include "clang/Tooling/CommonOptionsParser.h"
+#include "clang/Tooling/CompilationDatabase.h"
 #include "llvm/Support/Signals.h"
+#include <list>
 #include <memory>
 #include <mutex>
 #include <map>
@@ -18,6 +21,13 @@
 
 using namespace clang;
 using namespace clang::ast_matchers;
+
+class DefInfo;
+
+using OverridenUSRs = std::unordered_set<std::string>;
+using AllDeclarations = std::map<std::string, DefInfo>;
+using AllDeclarationsIterator = AllDeclarations::iterator;
+using DeclarationsList = std::list<AllDeclarationsIterator>;
 
 template <class T, class Comp, class Alloc, class Predicate>
 void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
@@ -91,13 +101,26 @@ struct DeclLocHash {
     }
 };
 
+// Converts, e.g., SomeType<int>::print	to SomeType::print
+std::string RemoveTemplateFromMember(const FunctionDecl *F) {
+    if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
+        const CXXRecordDecl *Parent = MD->getParent();
+        if (auto *Spec = dyn_cast<ClassTemplateSpecializationDecl>(Parent)) {
+            // Get the 'T' from 'T<int>'
+            std::string ClassName = Spec->getSpecializedTemplate()->getNameAsString();
+            return ClassName + "::" + MD->getNameAsString();
+        }
+    }
+    return F->getQualifiedNameAsString();
+}
+
 struct DefInfo {
   // Use this constructor when you find a use of a never-seen-before function
-  explicit DefInfo(const size_t uses) : Uses(uses) {}
+  explicit DefInfo() {}
 
   // Use this constructor when you find a declaration or a definition of a never-seen-before function
   explicit DefInfo(const FunctionDecl * const F)
-    : Uses(0), Name(F->getQualifiedNameAsString()) {
+    : Uses(0), Name(RemoveTemplateFromMember(F)) {
   }
 
   bool sawDefinition() const { return !Definitions.empty(); }
@@ -112,23 +135,88 @@ struct DefInfo {
       ds.insert({R, SM});
     }
   }
-  size_t Uses;
+  void addUses(const unsigned uses) {
+      if (base)
+          base->addUses(uses);
+      else
+          Uses += uses;
+  }
+  void addBase(DefInfo *info) {
+      assert(info);
+      if (info != this && !base)
+          base = info;
+  }
+  unsigned getUses() const { return base ? base->getUses() : Uses; }
+
+  size_t Uses = 0;
   std::string Name;
   std::unordered_set<DeclLoc, DeclLocHash> Declarations;
   std::unordered_set<DeclLoc, DeclLocHash> Definitions;
+  DefInfo *base = nullptr; // the base virtual definition
 };
 
 std::mutex Mutex;
-std::map<std::string, DefInfo> AllDecls;
+AllDeclarations AllDecls;
 
-bool getUSRForDecl(const Decl *Decl, std::string &USR) {
-  llvm::SmallVector<char, 128> Buff;
+bool getUSRForDecl (const FunctionDecl *F, std::string &USR) {
+    const Decl *Target = F;
 
-  if (index::generateUSRForDecl(Decl, Buff))
-    return false;
+    if (const auto MD = dyn_cast<CXXMethodDecl>(F)) {
+        // matches the template definition (SomeType<T>::find<U>())
+        // or template <typename T> template <> void SomeType<T>::find<int>()
+        if (const auto FTD = MD->getDescribedFunctionTemplate()) {
+            Target = FTD;
+        }
+        // matches a specific instantiation of a template method
+        // SomeType::find<int>() -> SomeType::find<U>() or
+        // SomeType<double>::find<int>() -> SomeType<double>::find<U>()
+        // The remaining class type (double) is stripped below (Parent class template block)
+        else if (const auto FTD = MD->getPrimaryTemplate()) {
+            Target = FTD;
+        }
+        // matches a member of a template class
+        // e.g., SomeType<int>::parse() -> SomeType<T>::parse()
+        else if (const auto Pattern = MD->getInstantiatedFromMemberFunction()) {
+            Target = Pattern;
+        }
 
-  USR = std::string(Buff.data(), Buff.size());
-  return true;
+        // Handle Parent class template
+        // E.g., SomeType<int>
+        const CXXRecordDecl *Parent = MD->getParent();
+        // go further if Parent is a template
+        if (const auto *Spec = dyn_cast<ClassTemplateSpecializationDecl>(Parent)) {
+            // Jump from SomeType<int> to the generic template SomeType<T>
+            ClassTemplateDecl *PrimaryClassTemplate = Spec->getSpecializedTemplate();
+            CXXRecordDecl *ClassPattern = PrimaryClassTemplate->getTemplatedDecl();
+
+            // Find the method inside the PRIMARY class pattern
+            // This is the "uninstantiated" version of the function.
+            auto Lookups = ClassPattern->lookup(MD->getDeclName());
+            for (NamedDecl *ND : Lookups) {
+                // it's a template member function
+                if (auto *FTD = dyn_cast<FunctionTemplateDecl>(ND)) {
+                    Target = FTD;
+                    break;
+                }
+                // it's a normal member function in a template class
+                if (auto *Method = dyn_cast<CXXMethodDecl>(ND)) {
+                    Target = Method;
+                    break;
+                }
+            }
+        }
+    } else if (F->isTemplateInstantiation()) {
+        Target = F->getTemplateInstantiationPattern();
+    }
+
+    assert(Target);
+
+    llvm::SmallVector<char, 128> Buff;
+    if (clang::index::generateUSRForDecl(Target, Buff)) {
+        return false;
+    }
+    USR = std::string(Buff.data(), Buff.size());
+    return true;
 }
 
 // Whether this is a compiler-generated function, including a method of a
@@ -164,9 +252,10 @@ public:
 
       const auto F = declaration->getDefinition();
       assert(F);
-      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(F));
-      it_inserted.first->second.addDeclarationsAndDefinitions(F, SM);
-
+      auto [it, success] = AllDecls.try_emplace(USR, DefInfo(F));
+      it->second.addDeclarationsAndDefinitions(F, SM);
+      DeclarationsList overridenList{it};
+      handleOverridenMethods(F, it->second, overridenList);
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
       //    " uses: " << it_inserted.first->second.Uses << "\n";
@@ -177,14 +266,36 @@ public:
       std::string USR;
       if (!getUSRForDecl(F, USR))
         continue;
-      const auto it_inserted = AllDecls.emplace(std::move(USR), pair.second);
-      if (!it_inserted.second) {
-        it_inserted.first->second.Uses += pair.second;
-      }
+      auto [it, success] = AllDecls.try_emplace(USR, DefInfo());
+      DeclarationsList overridenList{it};
+      handleOverridenMethods(F, it->second, overridenList);
+      it->second.addUses(pair.second);
+    }
       // llvm::errs() << "saw usage: " << F->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
       //    " uses: " << it_inserted.first->second.Uses << "\n";
-    }
+  }
+
+  void handleOverridenMethods(const FunctionDecl *F, DefInfo &info, DeclarationsList &overridenList) {
+      if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
+          if (MD->size_overridden_methods()) {
+            for (const auto method: MD->overridden_methods()) {
+                const auto canonicalMethod = method->getCanonicalDecl();
+                std::string overridenUSR;
+                if (!getUSRForDecl(canonicalMethod, overridenUSR))
+                    continue;
+                auto [it, success] = AllDecls.try_emplace(overridenUSR, DefInfo(canonicalMethod));
+                overridenList.push_back(it);
+                handleOverridenMethods(canonicalMethod, it->second, overridenList);
+            }
+          } else {
+              if (overridenList.size() < 2)
+                  return; // already added by the caller
+              for (const auto &def : overridenList) {
+                  def->second.addBase(&info);
+              }
+          }
+      }
   }
 
   void handleUse(const ValueDecl *D, const SourceManager *SM) {
@@ -199,51 +310,28 @@ public:
     if (SM->isInSystemHeader(FD->getSourceRange().getBegin()))
       return;
 
-    if (FD->isTemplateInstantiation()) {
-      FD = FD->getTemplateInstantiationPattern();
-      assert(FD);
-    }
-
 #if 0
     llvm::errs() << "Use ";
     FD->printName(llvm::errs());
     //llvm::errs() << " USR:" << USR;
     llvm::errs() << "\n";
 #endif
-     auto [it, inserted] = Uses.try_emplace(FD->getCanonicalDecl(), 1);
-     if (!inserted)
+     auto [it, success] = Uses.try_emplace(FD->getCanonicalDecl(), 1);
+     if (!success) {
          it->second++;
+     }
   }
   void run(const MatchFinder::MatchResult &Result) override {
     if (const auto *F = Result.Nodes.getNodeAs<FunctionDecl>("fnDecl")) {
       if (!F->hasBody())
         return; // Ignore '= delete' and '= default' definitions.
 
-      if (auto *Templ = F->getInstantiatedFromMemberFunction())
-        F = Templ;
-
-      if (F->isTemplateInstantiation()) {
-        F = F->getTemplateInstantiationPattern();
-        assert(F);
-      }
-
       auto Begin = F->getSourceRange().getBegin();
       if (Result.SourceManager->isInSystemHeader(Begin))
         return;
 
-      if (!Result.SourceManager->isWrittenInMainFile(Begin))
-        return;
-
       auto *MD = dyn_cast<CXXMethodDecl>(F);
       if (MD) {
-        if (MD->isVirtual()
-        #if CLANG_VERSION_MAJOR >= 18
-          && !MD->isPureVirtual()
-        #else
-          && !MD->isPure()
-        #endif
-          && MD->size_overridden_methods())
-          return; // overriding method
         if (isa<CXXDestructorDecl>(MD))
           return; // We don't see uses of destructors.
       }
@@ -286,6 +374,7 @@ public:
   }
 
   std::set<const FunctionDecl *> Defs;
+  // value: the number of uses
   std::map<const FunctionDecl *, unsigned> Uses;
 };
 
@@ -345,6 +434,22 @@ int main(int argc, const char **argv) {
     return 1;
   }
 
+  auto OptionsParser = clang::tooling::CommonOptionsParser::create(argc, argv, XUnusedCategory);
+  if (!OptionsParser) {
+      llvm::errs() << OptionsParser.takeError() << "\n";
+      return 1;
+  }
+  auto &DB = OptionsParser->getCompilations();
+  // collect libraries sources for exclusion
+  std::set<std::string> librarySourceFiles;
+  for (auto &File : DB.getAllFiles()) {
+      for (const auto &Cmd : DB.getCompileCommands(File)) {
+          if (!Cmd.Output.empty() && Cmd.Output.find("_la-") != std::string::npos) {
+              librarySourceFiles.insert(File);
+          }
+      }
+  }
+
   auto Adjuster = clang::tooling::getInsertArgumentAdjuster("-fparse-all-comments");
 
   auto Err =
@@ -362,17 +467,23 @@ int main(int argc, const char **argv) {
     if (!I.sawDefinition())
         continue; // assume this function is external to the project being scanned
 
-    if (I.Uses > 0 && !reportFunctions)
+    if (I.getUses() > 0 && !reportFunctions)
         continue; // a used function that does not need to be reported
 
     const auto &reportDefinition = *I.Definitions.begin();
-    if (I.Uses == 0) {
+
+    if (librarySourceFiles.find(std::string(reportDefinition.Filename.str())) != librarySourceFiles.end()) {
+        llvm::errs() << "Skip library source: " << reportDefinition.Filename << "\n";
+        continue;
+    }
+
+    if (I.getUses() == 0) {
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
     } else {
       assert(reportFunctions);
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
-          ": note: Function '" << I.Name << "' uses=" << I.Uses << "\n";
+          ": note: Function '" << I.Name << "' uses=" << I.getUses() << "\n";
     }
     for (auto &D : I.Declarations) {
       llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
