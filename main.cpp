@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <map>
+#include <unordered_set>
 
 
 using namespace clang;
@@ -31,19 +32,90 @@ void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
 
 struct DeclLoc {
   DeclLoc() = default;
-  DeclLoc(std::string Filename, unsigned Line)
-      : Filename(std::move(Filename)), Line(Line) {}
+  DeclLoc(const FunctionDecl *F, const SourceManager &SM) {
+    auto range = F->getSourceRange();
+
+    // expand to include 'template<...>' if it exists
+    if (clang::FunctionTemplateDecl *TD = F->getDescribedFunctionTemplate())
+        range = TD->getSourceRange();
+
+    // Resolve macros to the "File" level (where the macro is called, not
+    // where it is defined). Without that Begin and End may even point
+    // to different files!
+    const auto Begin = SM.getFileLoc(range.getBegin());
+    const auto End = SM.getFileLoc(range.getEnd());
+
+    FirstLine = SM.getSpellingLineNumber(Begin);
+    LastLine = SM.getSpellingLineNumber(End);
+    Filename = SM.getFilename(Begin).str();
+    assert(!Filename.empty());
+    SM.getFileManager().makeAbsolutePath(Filename);
+    // normalize paths
+    llvm::sys::path::remove_dots(Filename, true);
+
+    const auto &context = F->getASTContext();
+    if (const auto RC = context.getRawCommentForDeclNoCache(F)) {
+        clang::SourceRange cRange = RC->getSourceRange();
+        const auto cBegin = SM.getFileLoc(cRange.getBegin());
+        const auto cEnd = SM.getFileLoc(cRange.getEnd());
+
+        CommentFirstLine = SM.getSpellingLineNumber(cBegin);
+        CommentLastLine = SM.getSpellingLineNumber(cEnd);
+        assert(CommentFirstLine);
+        assert(CommentLastLine);
+        assert(CommentFirstLine <= CommentLastLine);
+
+        // proximity check: function must follow the comment with no empty lines
+        // between them
+        if (FirstLine <= CommentLastLine || (FirstLine - CommentLastLine) > 1) {
+            CommentFirstLine = 0;
+            CommentLastLine = 0;
+        }
+    }
+  }
+  bool operator==(const DeclLoc& other) const {
+    return Filename == other.Filename &&
+           FirstLine == other.FirstLine &&
+           LastLine == other.LastLine;
+  }
   SmallString<128> Filename;
-  unsigned Line;
+  unsigned FirstLine = 0;
+  unsigned LastLine = 0; // same as FirstLine for single-line code
+  unsigned CommentFirstLine = 0;
+  unsigned CommentLastLine = 0;
+};
+
+struct DeclLocHash {
+    size_t operator()(const DeclLoc& fr) const {
+      return llvm::hash_combine(fr.Filename, fr.FirstLine, fr.LastLine);
+    }
 };
 
 struct DefInfo {
-  size_t Definitions;
+  // Use this constructor when you find a use of a never-seen-before function
+  explicit DefInfo(const size_t uses) : Uses(uses) {}
+
+  // Use this constructor when you find a declaration or a definition of a never-seen-before function
+  explicit DefInfo(const FunctionDecl * const F)
+    : Uses(0), Name(F->getQualifiedNameAsString()) {
+  }
+
+  bool sawDefinition() const { return !Definitions.empty(); }
+  void addDeclarationsAndDefinitions(const FunctionDecl *F, const SourceManager &SM) {
+    if (Name.empty())
+        Name = F->getQualifiedNameAsString();
+    for (const FunctionDecl *R : F->redecls()) {
+      if (!R->getLocation().isValid()) {
+        continue; // no physical file representation
+      }
+      auto &ds = R->doesThisDeclarationHaveABody() ? Definitions : Declarations;
+      ds.insert({R, SM});
+    }
+  }
   size_t Uses;
   std::string Name;
-  std::string Filename;
-  unsigned Line;
-  std::vector<DeclLoc> Declarations;
+  std::unordered_set<DeclLoc, DeclLocHash> Declarations;
+  std::unordered_set<DeclLoc, DeclLocHash> Definitions;
 };
 
 std::mutex Mutex;
@@ -57,20 +129,6 @@ bool getUSRForDecl(const Decl *Decl, std::string &USR) {
 
   USR = std::string(Buff.data(), Buff.size());
   return true;
-}
-
-/// Returns all declarations that are not the definition of F
-std::vector<DeclLoc> getDeclarations(const FunctionDecl *F,
-                                     const SourceManager &SM) {
-  std::vector<DeclLoc> Decls;
-  for (const FunctionDecl *R : F->redecls()) {
-    if (R->doesThisDeclarationHaveABody())
-      continue;
-    auto Begin = R->getSourceRange().getBegin();
-    Decls.emplace_back(SM.getFilename(Begin).str(), SM.getSpellingLineNumber(Begin));
-    SM.getFileManager().makeAbsolutePath(Decls.back().Filename);
-  }
-  return Decls;
 }
 
 // Whether this is a compiler-generated function, including a method of a
@@ -106,30 +164,22 @@ public:
 
       const auto F = declaration->getDefinition();
       assert(F);
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{1, 0});
-      if (!it_inserted.second) {
-        it_inserted.first->second.Definitions++;
-      }
-      it_inserted.first->second.Name = F->getQualifiedNameAsString();
-
-      auto Begin = F->getSourceRange().getBegin();
-      it_inserted.first->second.Filename = SM.getFilename(Begin);
-      it_inserted.first->second.Line = SM.getSpellingLineNumber(Begin);
-
-      it_inserted.first->second.Declarations = getDeclarations(F, SM);
+      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(F));
+      it_inserted.first->second.addDeclarationsAndDefinitions(F, SM);
 
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
       //    " uses: " << it_inserted.first->second.Uses << "\n";
     }
 
-    for (const auto F: Uses) {
+    for (const auto pair: Uses) {
+      const auto F = pair.first;
       std::string USR;
       if (!getUSRForDecl(F, USR))
         continue;
-      auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo{0, 1});
+      const auto it_inserted = AllDecls.emplace(std::move(USR), pair.second);
       if (!it_inserted.second) {
-        it_inserted.first->second.Uses++;
+        it_inserted.first->second.Uses += pair.second;
       }
       // llvm::errs() << "saw usage: " << F->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
@@ -160,7 +210,9 @@ public:
     //llvm::errs() << " USR:" << USR;
     llvm::errs() << "\n";
 #endif
-    Uses.insert(FD->getCanonicalDecl());
+     auto [it, inserted] = Uses.try_emplace(FD->getCanonicalDecl(), 1);
+     if (!inserted)
+         it->second++;
   }
   void run(const MatchFinder::MatchResult &Result) override {
     if (const auto *F = Result.Nodes.getNodeAs<FunctionDecl>("fnDecl")) {
@@ -234,7 +286,7 @@ public:
   }
 
   std::set<const FunctionDecl *> Defs;
-  std::set<const FunctionDecl *> Uses;
+  std::map<const FunctionDecl *, unsigned> Uses;
 };
 
 class XUnusedASTConsumer : public ASTConsumer {
@@ -292,9 +344,12 @@ int main(int argc, const char **argv) {
     llvm::errs() << llvm::toString(Executor.takeError()) << "\n";
     return 1;
   }
+
+  auto Adjuster = clang::tooling::getInsertArgumentAdjuster("-fparse-all-comments");
+
   auto Err =
       Executor->get()->execute(std::unique_ptr<XUnusedFrontendActionFactory>(
-          new XUnusedFrontendActionFactory()));
+          new XUnusedFrontendActionFactory()), Adjuster);
 
   if (Err) {
     llvm::errs() << llvm::toString(std::move(Err)) << "\n";
@@ -304,19 +359,44 @@ int main(int argc, const char **argv) {
   for (auto &KV : AllDecls) {
     DefInfo &I = KV.second;
 
-    if (!I.Definitions)
+    if (!I.sawDefinition())
         continue; // assume this function is external to the project being scanned
 
     if (I.Uses > 0 && !reportFunctions)
         continue; // a used function that does not need to be reported
 
+    const auto &reportDefinition = *I.Definitions.begin();
     if (I.Uses == 0) {
-      llvm::errs() << I.Filename << ":" << I.Line << ": warning: Function '" << I.Name << "' is unused\n";
+      llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
+                   << " Function '" << I.Name << "' is unused\n";
     } else {
       assert(reportFunctions);
-      llvm::errs() << I.Filename << ":" << I.Line << ": note: Function '" << I.Name << "' uses=" << I.Uses << "\n";
+      llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
+          ": note: Function '" << I.Name << "' uses=" << I.Uses << "\n";
     }
-    for (const auto &D : I.Declarations)
-      llvm::errs() << D.Filename << ":" << D.Line << ": note:" << " declared here\n";
+    for (auto &D : I.Declarations) {
+      llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
+                   << " declared here\n";
+      llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
+                   << " declaration ends here\n";
+      if (D.CommentFirstLine) {
+        llvm::errs() << D.Filename << ":" << D.CommentFirstLine << ": note:"
+                     << " comment starts here\n";
+        llvm::errs() << D.Filename << ":" << D.CommentLastLine << ": note:"
+                   << " comment ends here\n";
+      }
+    }
+    for (auto &D : I.Definitions) {
+      llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
+                   << " defined here\n";
+      llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
+                   << " definition ends here\n";
+      if (D.CommentFirstLine) {
+        llvm::errs() << D.Filename << ":" << D.CommentFirstLine << ": note:"
+                     << " comment starts here\n";
+        llvm::errs() << D.Filename << ":" << D.CommentLastLine << ": note:"
+                   << " comment ends here\n";
+      }
+    }
   }
 }

@@ -1,0 +1,43 @@
+// This is an LLVM-style lit test that uses FileCheck.
+// The test checks that start and end lines of all declarations
+// and definitions of an unused function are reported correctly.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK-DAG: {{.*}}Function 'F' is unused
+// CHECK-DAG: source1.cc:2:{{.*}}defined here
+// CHECK-DAG: source1.cc:4:{{.*}}definition ends here
+// CHECK-DAG: source2.cc:1:{{.*}}declared here
+// CHECK-DAG: source2.cc:1:{{.*}}declaration ends here
+// CHECK-DAG: source2.cc:2:{{.*}}defined here
+// CHECK-DAG: source2.cc:4:{{.*}}definition ends here
+
+//--- source1.cc
+// no "extern" declaration for F() in this source file
+int F() {
+    return 0;
+}
+int main() { return 0; }
+
+//--- source2.cc
+extern int F();
+int F() {
+    return 0;
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/source1.cc",
+    "file": "TESTDIR/source1.cc"
+  },
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/source2.cc",
+    "file": "TESTDIR/source2.cc"
+  }
+]
+
