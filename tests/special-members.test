@@ -1,0 +1,40 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK-DAG: Special::Special{{.*}}uses=1
+// CHECK-DAG: Special::Special{{.*}}uses=1
+// CHECK-DAG: Special::Special{{.*}}uses=1
+// CHECK-DAG: Special::operator={{.*}}uses=1
+// CHECK-DAG: Special::operator={{.*}}uses=1
+
+//--- special-members.cc
+#include <new>
+#include <cstddef>
+#include <utility>
+class Special {
+    public:
+        Special() :val (0) {}
+        Special(const Special&) {}
+        Special( Special&&) {}
+        Special& operator=(const Special &x) { val = x.val; return *this; }
+        Special& operator=( Special &&x) { val = x.val; x.val = 0; return *this; }
+
+    private:
+        int val = 0;
+};
+
+int main() {
+    Special x;
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/special-members.cc",
+    "file": "TESTDIR/special-members.cc"
+  }
+]
