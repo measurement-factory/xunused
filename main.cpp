@@ -304,6 +304,26 @@ bool isCompilerGenerated(const FunctionDecl * const f) {
   return false;
 }
 
+// whether this method belongs to a class inherited from an external library class
+static
+bool externalBase(const CXXMethodDecl *MD, const SourceManager &SM) {
+    const auto parent = MD->getParent();
+    assert(parent);
+    if (!parent->hasDefinition() || !parent->getNumBases())
+        return false;
+    bool foundLibraryBase = false;
+    const auto v = parent->forallBases([&](const CXXRecordDecl *base) {
+            const auto loc = base->getLocation();
+            // Check if the base class is defined in a system header
+            if (SM.isInSystemHeader(loc)) {
+                foundLibraryBase = true;
+                return false; // stop searching
+            }
+            return false; // continue searching other bases;
+    });
+    return foundLibraryBase;
+}
+
 class FunctionDeclMatchHandler : public MatchFinder::MatchCallback {
 public:
   void finalize(const SourceManager &SM) {
@@ -367,6 +387,11 @@ public:
     if (!FD)
       return;
 
+    if (const auto MD = dyn_cast<CXXMethodDecl>(D)) {
+      if (externalBase(MD, *SM))
+          return;
+    }
+
     HandleSpecialMember(FD, true);
 
     if (isCompilerGenerated(FD))
@@ -399,6 +424,9 @@ public:
 
       auto *MD = dyn_cast<CXXMethodDecl>(F);
       if (MD) {
+        if (externalBase(MD, *Result.SourceManager))
+            return;
+
         HandleSpecialMember(MD, false);
         if (isa<CXXDestructorDecl>(MD))
           return; // We don't see uses of destructors.
