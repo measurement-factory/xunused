@@ -198,6 +198,8 @@ struct DefInfo {
   }
 
   void addClassReference(const FunctionDecl *F) {
+    if (!IsSpecialMember(F))
+        return;
     if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
         const auto classDecl = MD->getParent();
         assert(classDecl);
@@ -205,6 +207,7 @@ struct DefInfo {
         if (!getUSRForDecl(classDecl, USR))
             return;
         classRef = ClassDecls.find(USR);
+        llvm::errs() << "addClassReference:" << MD->getQualifiedNameAsString() <<  "\n";
         assert(classRef != ClassDecls.end());
     }
   }
@@ -306,7 +309,10 @@ bool isCompilerGenerated(const FunctionDecl * const f) {
 
 // whether this method belongs to a class inherited from an external library class
 static
-bool externalBase(const CXXMethodDecl *MD, const SourceManager &SM) {
+bool externalBase(const FunctionDecl *F, const SourceManager &SM) {
+    const auto MD = dyn_cast<CXXMethodDecl>(F);
+    if (!MD)
+        return false;
     const auto parent = MD->getParent();
     assert(parent);
     if (!parent->hasDefinition() || !parent->getNumBases())
@@ -319,7 +325,7 @@ bool externalBase(const CXXMethodDecl *MD, const SourceManager &SM) {
                 foundLibraryBase = true;
                 return false; // stop searching
             }
-            return false; // continue searching other bases;
+            return true; // continue searching other bases;
     });
     return foundLibraryBase;
 }
@@ -387,11 +393,6 @@ public:
     if (!FD)
       return;
 
-    if (const auto MD = dyn_cast<CXXMethodDecl>(D)) {
-      if (externalBase(MD, *SM))
-          return;
-    }
-
     HandleSpecialMember(FD, true);
 
     if (isCompilerGenerated(FD))
@@ -401,6 +402,8 @@ public:
     if (SM->isInSystemHeader(FD->getSourceRange().getBegin()))
       return;
 
+    if (externalBase(FD, *SM))
+        return;
 #if 0
     llvm::errs() << "Use ";
     FD->printName(llvm::errs());
@@ -424,9 +427,6 @@ public:
 
       auto *MD = dyn_cast<CXXMethodDecl>(F);
       if (MD) {
-        if (externalBase(MD, *Result.SourceManager))
-            return;
-
         HandleSpecialMember(MD, false);
         if (isa<CXXDestructorDecl>(MD))
           return; // We don't see uses of destructors.
@@ -437,6 +437,9 @@ public:
 
       if (isCompilerGenerated(F))
         return;
+
+      if (externalBase(F, *Result.SourceManager))
+          return;
 
 #if 0
       llvm::errs() << "FunctionDecl ";
