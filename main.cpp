@@ -207,7 +207,6 @@ struct DefInfo {
         if (!getUSRForDecl(classDecl, USR))
             return;
         classRef = ClassDecls.find(USR);
-        llvm::errs() << "addClassReference:" << MD->getQualifiedNameAsString() <<  "\n";
         assert(classRef != ClassDecls.end());
     }
   }
@@ -313,21 +312,14 @@ bool externalBase(const FunctionDecl *F, const SourceManager &SM) {
     const auto MD = dyn_cast<CXXMethodDecl>(F);
     if (!MD)
         return false;
-    const auto parent = MD->getParent();
-    assert(parent);
-    if (!parent->hasDefinition() || !parent->getNumBases())
-        return false;
-    bool foundLibraryBase = false;
-    const auto v = parent->forallBases([&](const CXXRecordDecl *base) {
-            const auto loc = base->getLocation();
-            // Check if the base class is defined in a system header
-            if (SM.isInSystemHeader(loc)) {
-                foundLibraryBase = true;
-                return false; // stop searching
-            }
-            return true; // continue searching other bases;
-    });
-    return foundLibraryBase;
+    for (const auto *overridden : MD->overridden_methods()) {
+        const auto parent = overridden->getParent();
+        assert(parent);
+        if (SM.isInSystemHeader(parent->getLocation()))
+            return true;
+        return externalBase(overridden, SM);
+    }
+    return false;
 }
 
 class FunctionDeclMatchHandler : public MatchFinder::MatchCallback {
