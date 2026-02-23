@@ -6,7 +6,6 @@
 // RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
 // CHECK-DAG: Special::Special{{.*}}uses=1
 // CHECK-DAG: Special::Special{{.*}}uses=1
-// CHECK-DAG: Special::Special{{.*}}uses=1
 // CHECK-DAG: Special::operator={{.*}}uses=1
 // CHECK-DAG: Special::operator={{.*}}uses=1
 

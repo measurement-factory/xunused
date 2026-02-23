@@ -26,12 +26,15 @@ class DefInfo;
 
 using OverridenUSRs = std::unordered_set<std::string>;
 using AllDeclarations = std::map<std::string, DefInfo>;
-using ClassDeclarations = std::map<std::string, bool>;
-using ClassDeclarationsIterator = ClassDeclarations::const_iterator;
 using AllDeclarationsIterator = AllDeclarations::iterator;
 using DeclarationsList = std::list<AllDeclarationsIterator>;
 
-ClassDeclarations ClassDecls;
+static llvm::cl::OptionCategory XUnusedCategory("xunused options");
+static llvm::cl::opt<bool> reportFunctions("report-functions",
+        llvm::cl::desc("Report (to stdout) the number of times a candidate function was used."), llvm::cl::cat(XUnusedCategory));
+static llvm::cl::opt<bool> SpecialMembers("special-members",
+        llvm::cl::desc("If one of the special class methods in a class is used, treat all other as used."), llvm::cl::cat(XUnusedCategory));
+
 bool getUSRForDecl (const Decl *F, std::string &USR);
 
 template <class T, class Comp, class Alloc, class Predicate>
@@ -106,12 +109,21 @@ struct DeclLocHash {
     }
 };
 
+class ClassInfo
+{
+    public:
+        bool specialMethod = false;
+};
+
+using ClassDeclarations = std::map<std::string, ClassInfo>;
+using ClassDeclarationsIterator = ClassDeclarations::const_iterator;
+ClassDeclarations ClassDecls;
+
 bool IsSpecialMember(const FunctionDecl *F)
 {
     if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
-        if (dyn_cast<CXXConstructorDecl>(MD)) {
-            // a specific constructor type may be checked by CD->isCopyConstructor()) and CD->isCopyConstructor()
-            return true;
+        if (const auto *constr = dyn_cast<CXXConstructorDecl>(MD)) {
+            return (constr->isCopyConstructor() || constr->isMoveConstructor());
         }
         if (isa<CXXDestructorDecl>(MD))
             return true;
@@ -134,10 +146,13 @@ void HandleSpecialMember(const FunctionDecl *F, const bool used) {
     if (!getUSRForDecl(classDecl, USR))
         return;
     auto it = ClassDecls.find(USR);
-    if (it == ClassDecls.end())
-        ClassDecls.emplace(USR, used);
+    if (it == ClassDecls.end()) {
+        ClassInfo classInfo;
+        classInfo.specialMethod = true;
+        ClassDecls.emplace(USR, classInfo);
+    }
     else if (used)
-        it->second = used;
+        it->second.specialMethod = used;
 }
 
 // Converts, e.g., SomeType<int>::print	to SomeType::print
@@ -159,7 +174,7 @@ struct DefInfo {
 
   // Use this constructor when you find a declaration or a definition of a never-seen-before function
   explicit DefInfo(const FunctionDecl * const F)
-    : Uses(0), Name(RemoveTemplateFromMember(F)), specialMember(IsSpecialMember(F)) {
+    : Uses(0), Name(RemoveTemplateFromMember(F)) {
         addClassReference(F);
   }
 
@@ -167,7 +182,6 @@ struct DefInfo {
   void addDeclarationsAndDefinitions(const FunctionDecl *F, const SourceManager &SM) {
     if (Name.empty()) {
         Name = RemoveTemplateFromMember(F);
-        specialMember = IsSpecialMember(F);
         addClassReference(F);
     }
     for (const FunctionDecl *R : F->redecls()) {
@@ -189,26 +203,36 @@ struct DefInfo {
       if (info != this && !base)
           base = info;
   }
-  unsigned getUses(const bool handleSpecialMembers) const {
-      if (handleSpecialMembers && specialMember) {
-          assert(classRef != ClassDecls.end());
-          return classRef->second;
-      }
-      return base ? base->getUses(handleSpecialMembers) : Uses;
+
+  unsigned getUses() const {
+      const auto uses = base ? base->getUses() : Uses;
+      if (uses)
+          return uses;
+
+      if (classRef == ClassDecls.end())
+          return 0;
+
+      if (SpecialMembers.getValue() && classRef->second.specialMethod)
+          return 1;
+
+      return 0;
   }
 
   void addClassReference(const FunctionDecl *F) {
-    if (!IsSpecialMember(F))
+    const auto *MD = dyn_cast<CXXMethodDecl>(F);
+    if (!MD)
         return;
-    if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
-        const auto classDecl = MD->getParent();
-        assert(classDecl);
-        std::string USR;
-        if (!getUSRForDecl(classDecl, USR))
-            return;
-        classRef = ClassDecls.find(USR);
-        assert(classRef != ClassDecls.end());
-    }
+
+    if (!IsSpecialMember(MD))
+        return;
+
+    const auto classDecl = MD->getParent();
+    assert(classDecl);
+    std::string USR;
+    if (!getUSRForDecl(classDecl, USR))
+        return;
+    classRef = ClassDecls.find(USR);
+    assert(classRef != ClassDecls.end());
   }
 
   size_t Uses = 0;
@@ -217,7 +241,6 @@ struct DefInfo {
   std::unordered_set<DeclLoc, DeclLocHash> Definitions;
   DefInfo *base = nullptr; // the base virtual definition
   ClassDeclarationsIterator classRef = ClassDecls.end();
-  bool specialMember = false;
 };
 
 std::mutex Mutex;
@@ -514,12 +537,6 @@ int main(int argc, const char **argv) {
   )";
 
   tooling::ExecutorName.setInitialValue("all-TUs");
-  static llvm::cl::OptionCategory XUnusedCategory("xunused options");
-  static llvm::cl::opt<bool> reportFunctions("report-functions",
-          llvm::cl::desc("Report (to stdout) the number of times a candidate function was used."), llvm::cl::cat(XUnusedCategory));
-  static llvm::cl::opt<bool> specialMembers("special-members",
-          llvm::cl::desc("If one of the special class methods in a class is used, treat all other as used."), llvm::cl::cat(XUnusedCategory));
-
   auto Executor = clang::tooling::createExecutorFromCommandLineArgs(
       argc, argv, XUnusedCategory, Overview);
   if (!Executor) {
@@ -560,7 +577,7 @@ int main(int argc, const char **argv) {
     if (!I.sawDefinition())
         continue; // assume this function is external to the project being scanned
 
-    if (I.getUses(specialMembers.getValue()) > 0 && !reportFunctions)
+    if (I.getUses() > 0 && !reportFunctions)
         continue; // a used function that does not need to be reported
 
     const auto &reportDefinition = *I.Definitions.begin();
@@ -570,13 +587,13 @@ int main(int argc, const char **argv) {
         continue;
     }
 
-    if (I.getUses(specialMembers.getValue()) == 0) {
+    if (I.getUses() == 0) {
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
     } else {
       assert(reportFunctions);
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
-          ": note: Function '" << I.Name << "' uses=" << I.getUses(specialMembers.getValue()) << "\n";
+          ": note: Function '" << I.Name << "' uses=" << I.getUses() << "\n";
     }
     for (auto &D : I.Declarations) {
       llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
