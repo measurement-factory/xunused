@@ -96,6 +96,7 @@ struct DeclLoc {
            FirstLine == other.FirstLine &&
            LastLine == other.LastLine;
   }
+
   SmallString<128> Filename;
   unsigned FirstLine = 0;
   unsigned LastLine = 0; // same as FirstLine for single-line code
@@ -104,22 +105,44 @@ struct DeclLoc {
 };
 
 struct DeclLocHash {
-    size_t operator()(const DeclLoc& fr) const {
-      return llvm::hash_combine(fr.Filename, fr.FirstLine, fr.LastLine);
-    }
+  size_t operator() (const DeclLoc& fr) const {
+    return llvm::hash_combine(fr.Filename, fr.FirstLine, fr.LastLine);
+  }
 };
 
 class ClassInfo
 {
-    public:
-        bool specialMethod = false;
+  public:
+    void addSpecialMember(const FunctionDecl *);
+    void addDefInfoReference(const CXXMethodDecl *MD, DefInfo *info);
+
+    unsigned specialUses() const;
+    unsigned equalityUses() const;
+    unsigned comparisonUses() const;
+
+    // whether at least one special method is used
+    // (this may be a hidden method without DefInfo)
+    bool specialMethodIsUsed = false;
+    // whether at least one of the overloaded operators '==' and '!=' is used
+    bool equalityMethodIsUsed = false;
+    // whether at least one of the overloaded operators '>=', '<=', '<', '>', '<=>' is used
+    bool comparisonMethodIsUsed = false;
+
+    // list of DefInfo entries that contain special methods
+    std::list<DefInfo *> specialMethods;
+
+    // list of DefInfo entries that contain '==' and '!=' operators
+    std::list<DefInfo *> equalityMethods;
+
+    // list of DefInfo entries that contain '>=', '<=', '<', '>', '<=>' is used
+    std::list<DefInfo *> comparisonMethods;
 };
 
 using ClassDeclarations = std::map<std::string, ClassInfo>;
-using ClassDeclarationsIterator = ClassDeclarations::const_iterator;
+using ClassDeclarationsIterator = ClassDeclarations::iterator;
 ClassDeclarations ClassDecls;
 
-bool IsSpecialMember(const FunctionDecl *F)
+bool IsSpecialMethod(const FunctionDecl *F)
 {
     if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
         if (const auto *constr = dyn_cast<CXXConstructorDecl>(MD)) {
@@ -137,8 +160,59 @@ bool IsSpecialMember(const FunctionDecl *F)
     return false;
 }
 
+bool IsEqualityMethod(const clang::FunctionDecl *FD) {
+    if (!FD->isOverloadedOperator())
+        return false;
+    const auto operatorKind = FD->getOverloadedOperator();
+    switch (operatorKind) {
+        case clang::OO_EqualEqual:       // ==
+        case clang::OO_ExclaimEqual:     // !=
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsComparisonMethod(const clang::FunctionDecl *FD) {
+    if (!FD->isOverloadedOperator())
+        return false;
+    const auto operatorKind = FD->getOverloadedOperator();
+    switch (operatorKind) {
+        case clang::OO_Less:             // <
+        case clang::OO_Greater:          // >
+        case clang::OO_LessEqual:        // <=
+        case clang::OO_GreaterEqual:     // >=
+        case clang::OO_Spaceship:        // <=> (C++20)
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsAnySpecialMethod(const FunctionDecl *F) {
+    return IsSpecialMethod(F) || IsEqualityMethod(F) || IsComparisonMethod(F);
+}
+
+void ClassInfo::addSpecialMember(const FunctionDecl *F) {
+    if (IsSpecialMethod(F))
+        specialMethodIsUsed = true;
+    else if (IsEqualityMethod(F))
+        equalityMethodIsUsed = true;
+    else if (IsComparisonMethod(F))
+        comparisonMethodIsUsed = true;
+}
+
+void ClassInfo::addDefInfoReference(const CXXMethodDecl *MD, DefInfo *info) {
+    if (IsSpecialMethod(MD))
+        specialMethods.push_back(info);
+    else if (IsEqualityMethod(MD))
+        equalityMethods.push_back(info);
+    else if (IsComparisonMethod(MD))
+        comparisonMethods.push_back(info);
+}
+
 void HandleSpecialMember(const FunctionDecl *F, const bool used) {
-    if (!IsSpecialMember(F))
+    if (!IsAnySpecialMethod(F))
         return;
     const auto classDecl = dyn_cast<CXXMethodDecl>(F)->getParent();
     assert(classDecl);
@@ -147,12 +221,10 @@ void HandleSpecialMember(const FunctionDecl *F, const bool used) {
         return;
     auto it = ClassDecls.find(USR);
     if (it == ClassDecls.end()) {
-        ClassInfo classInfo;
-        classInfo.specialMethod = true;
-        ClassDecls.emplace(USR, classInfo);
+        const auto inserted = ClassDecls.emplace(USR, ClassInfo());
+        it = inserted.first;
     }
-    else if (used)
-        it->second.specialMethod = used;
+    it->second.addSpecialMember(F);
 }
 
 // Converts, e.g., SomeType<int>::print	to SomeType::print
@@ -204,16 +276,27 @@ struct DefInfo {
           base = info;
   }
 
+  // the number of time this function is actually used
+  // without 'special' cases
+  unsigned getRawUses() const {
+      return base ? base->getUses() : Uses;
+  }
+
+  // the number of time this function is used
+  // including 'special' cases, when the usage of one function
+  // of a group marks any function in the group as 'used'
   unsigned getUses() const {
-      const auto uses = base ? base->getUses() : Uses;
-      if (uses)
+      if (const auto uses = getRawUses())
           return uses;
 
       if (classRef == ClassDecls.end())
           return 0;
 
-      if (SpecialMembers.getValue() && classRef->second.specialMethod)
-          return 1;
+      if (SpecialMembers.getValue()) {
+          return classRef->second.specialUses() ||
+                 classRef->second.equalityUses() ||
+                 classRef->second.comparisonUses();
+      }
 
       return 0;
   }
@@ -223,7 +306,7 @@ struct DefInfo {
     if (!MD)
         return;
 
-    if (!IsSpecialMember(MD))
+    if (!IsAnySpecialMethod(MD))
         return;
 
     const auto classDecl = MD->getParent();
@@ -233,6 +316,7 @@ struct DefInfo {
         return;
     classRef = ClassDecls.find(USR);
     assert(classRef != ClassDecls.end());
+    classRef->second.addDefInfoReference(MD, this);
   }
 
   size_t Uses = 0;
@@ -242,6 +326,30 @@ struct DefInfo {
   DefInfo *base = nullptr; // the base virtual definition
   ClassDeclarationsIterator classRef = ClassDecls.end();
 };
+
+unsigned
+ClassInfo::specialUses() const {
+    unsigned uses = 0;
+    for (const auto m: specialMethods)
+        uses += m->getRawUses();
+    return uses ? uses : specialMethodIsUsed;
+}
+
+unsigned
+ClassInfo::equalityUses() const {
+    unsigned uses = 0;
+    for (const auto m: equalityMethods)
+        uses += m->getRawUses();
+    return uses ? uses : equalityMethodIsUsed;
+}
+
+unsigned
+ClassInfo::comparisonUses() const {
+    unsigned uses = 0;
+    for (const auto m: comparisonMethods)
+        uses += m->getRawUses();
+    return uses ? uses : comparisonMethodIsUsed;
+}
 
 std::mutex Mutex;
 AllDeclarations AllDecls;

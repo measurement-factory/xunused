@@ -1,0 +1,44 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK-DAG: Comparison::operator=={{.*}}uses=1
+// CHECK-DAG: Comparison::operator!={{.*}}uses=1
+// CHECK-DAG: Comparison::operatorr<{{.*}}uses=1
+// CHECK-DAG: Comparison::operatorr>{{.*}}uses=1
+// CHECK-DAG: Comparison::operatorr<={{.*}}uses=1
+// CHECK-DAG: Comparison::operatorr>={{.*}}uses=1
+
+//--- comparison-members.cc
+class Comparison {
+public:
+    Comparison(int v) : x(v) {}
+
+    bool operator==(const Comparison& o) const { return x == o.x; }
+    bool operator!=(const Comparison& o) const { return !(*this == o); }
+
+    bool operator<(const Comparison& o) const { return x < o.x; }
+    bool operator>(const Comparison& o) const  { return o < *this; }
+    bool operator<=(const Comparison& o) const { return !(*this > o); }
+    bool operator>=(const Comparison& o) const { return !(*this < o); }
+
+    int x;
+};
+
+int main() {
+    Comparison x(1), y(2);
+    auto equal = x==y;
+    auto less = x<y;
+    return 0;
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/comparison-members.cc",
+    "file": "TESTDIR/comparison-members.cc"
+  }
+]
