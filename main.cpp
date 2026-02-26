@@ -114,11 +114,10 @@ class ClassInfo
 {
   public:
     void addSpecialMember(const FunctionDecl *);
-    void addDefInfoReference(const CXXMethodDecl *MD, DefInfo *info);
 
-    unsigned specialUses() const;
-    unsigned equalityUses() const;
-    unsigned comparisonUses() const;
+    unsigned specialUses() const { return specialMethodIsUsed; }
+    unsigned equalityUses() const { return equalityMethodIsUsed; }
+    unsigned comparisonUses() const { return comparisonMethodIsUsed; }
 
     // whether at least one special method is used
     // (this may be a hidden method without DefInfo)
@@ -127,15 +126,6 @@ class ClassInfo
     bool equalityMethodIsUsed = false;
     // whether at least one of the overloaded operators '>=', '<=', '<', '>', '<=>' is used
     bool comparisonMethodIsUsed = false;
-
-    // list of DefInfo entries that contain special methods
-    std::list<DefInfo *> specialMethods;
-
-    // list of DefInfo entries that contain '==' and '!=' operators
-    std::list<DefInfo *> equalityMethods;
-
-    // list of DefInfo entries that contain '>=', '<=', '<', '>', '<=>' is used
-    std::list<DefInfo *> comparisonMethods;
 };
 
 using ClassDeclarations = std::map<std::string, ClassInfo>;
@@ -202,19 +192,15 @@ void ClassInfo::addSpecialMember(const FunctionDecl *F) {
         comparisonMethodIsUsed = true;
 }
 
-void ClassInfo::addDefInfoReference(const CXXMethodDecl *MD, DefInfo *info) {
-    if (IsSpecialMethod(MD))
-        specialMethods.push_back(info);
-    else if (IsEqualityMethod(MD))
-        equalityMethods.push_back(info);
-    else if (IsComparisonMethod(MD))
-        comparisonMethods.push_back(info);
-}
-
 void HandleSpecialMember(const FunctionDecl *F, const bool used) {
     if (!IsAnySpecialMethod(F))
         return;
-    const auto classDecl = dyn_cast<CXXMethodDecl>(F)->getParent();
+
+    const auto MD = dyn_cast<CXXMethodDecl>(F);
+    if (!MD)
+        return;
+    const auto classDecl = MD->getParent();
+
     assert(classDecl);
     std::string USR;
     if (!getUSRForDecl(classDecl, USR))
@@ -316,7 +302,6 @@ struct DefInfo {
         return;
     classRef = ClassDecls.find(USR);
     assert(classRef != ClassDecls.end());
-    classRef->second.addDefInfoReference(MD, this);
   }
 
   size_t Uses = 0;
@@ -326,30 +311,6 @@ struct DefInfo {
   DefInfo *base = nullptr; // the base virtual definition
   ClassDeclarationsIterator classRef = ClassDecls.end();
 };
-
-unsigned
-ClassInfo::specialUses() const {
-    unsigned uses = 0;
-    for (const auto m: specialMethods)
-        uses += m->getRawUses();
-    return uses ? uses : specialMethodIsUsed;
-}
-
-unsigned
-ClassInfo::equalityUses() const {
-    unsigned uses = 0;
-    for (const auto m: equalityMethods)
-        uses += m->getRawUses();
-    return uses ? uses : equalityMethodIsUsed;
-}
-
-unsigned
-ClassInfo::comparisonUses() const {
-    unsigned uses = 0;
-    for (const auto m: comparisonMethods)
-        uses += m->getRawUses();
-    return uses ? uses : comparisonMethodIsUsed;
-}
 
 std::mutex Mutex;
 AllDeclarations AllDecls;

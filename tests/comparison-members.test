@@ -6,10 +6,10 @@
 // RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
 // CHECK-DAG: Comparison::operator=={{.*}}uses=1
 // CHECK-DAG: Comparison::operator!={{.*}}uses=1
-// CHECK-DAG: Comparison::operatorr<{{.*}}uses=1
-// CHECK-DAG: Comparison::operatorr>{{.*}}uses=1
-// CHECK-DAG: Comparison::operatorr<={{.*}}uses=1
-// CHECK-DAG: Comparison::operatorr>={{.*}}uses=1
+// CHECK-DAG: Comparison::operator<{{.*}}uses=1
+// CHECK-DAG: Comparison::operator>{{.*}}uses=1
+// CHECK-DAG: Comparison::operator<={{.*}}uses=1
+// CHECK-DAG: Comparison::operator>={{.*}}uses=1
 
 //--- comparison-members.cc
 class Comparison {
@@ -17,12 +17,12 @@ public:
     Comparison(int v) : x(v) {}
 
     bool operator==(const Comparison& o) const { return x == o.x; }
-    bool operator!=(const Comparison& o) const { return !(*this == o); }
+    bool operator!=(const Comparison& o) const { return x != o.x; }
 
     bool operator<(const Comparison& o) const { return x < o.x; }
-    bool operator>(const Comparison& o) const  { return o < *this; }
-    bool operator<=(const Comparison& o) const { return !(*this > o); }
-    bool operator>=(const Comparison& o) const { return !(*this < o); }
+    bool operator>(const Comparison& o) const  { return x> o.x; }
+    bool operator<=(const Comparison& o) const { return !(x > o.x); }
+    bool operator>=(const Comparison& o) const { return !(x < o.x); }
 
     int x;
 };
