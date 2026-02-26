@@ -5,9 +5,10 @@
 // RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
 // RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
 // CHECK-DAG: Special::Special{{.*}}uses=1
-// CHECK-DAG: Special::Special{{.*}}uses=1
-// CHECK-DAG: Special::operator={{.*}}uses=1
-// CHECK-DAG: Special::operator={{.*}}uses=1
+// CHECK-DAG: Special::Special{{.*}}uses=0
+// CHECK-DAG: Special::Special{{.*}}uses=0
+// CHECK-DAG: Special::operator={{.*}}uses=0
+// CHECK-DAG: Special::operator={{.*}}uses=0
 
 //--- special-members.cc
 #include <new>

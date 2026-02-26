@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <map>
+#include <optional>
 #include <unordered_set>
 
 
@@ -115,10 +116,9 @@ class ClassInfo
   public:
     void addSpecialMember(const FunctionDecl *);
 
-    unsigned specialUses() const { return specialMethodIsUsed; }
-    unsigned equalityUses() const { return equalityMethodIsUsed; }
-    unsigned comparisonUses() const { return comparisonMethodIsUsed; }
-
+    bool anySpecialMemberIsUsed() const {
+        return specialMethodIsUsed || equalityMethodIsUsed || comparisonMethodIsUsed;
+    }
     // whether at least one special method is used
     // (this may be a hidden method without DefInfo)
     bool specialMethodIsUsed = false;
@@ -262,29 +262,27 @@ struct DefInfo {
           base = info;
   }
 
-  // the number of time this function is actually used
+  // the number of times this function is actually used
   // without 'special' cases
   unsigned getRawUses() const {
-      return base ? base->getUses() : Uses;
+      return base ? base->getRawUses() : Uses;
   }
 
-  // the number of time this function is used
-  // including 'special' cases, when the usage of one function
-  // of a group marks any function in the group as 'used'
-  unsigned getUses() const {
+  // Returns the positive number of times this function is used, or
+  // 0, marking the special usage case, when the usage of one function
+  // of a group marks any function in the group as 'used', or
+  // std::nullopt for the unused function.
+  std::optional<unsigned> getUses() const {
       if (const auto uses = getRawUses())
           return uses;
 
       if (classRef == ClassDecls.end())
+          return std::nullopt;
+
+      if (SpecialMembers.getValue() && classRef->second.anySpecialMemberIsUsed())
           return 0;
 
-      if (SpecialMembers.getValue()) {
-          return classRef->second.specialUses() ||
-                 classRef->second.equalityUses() ||
-                 classRef->second.comparisonUses();
-      }
-
-      return 0;
+      return std::nullopt;
   }
 
   void addClassReference(const FunctionDecl *F) {
@@ -646,7 +644,9 @@ int main(int argc, const char **argv) {
     if (!I.sawDefinition())
         continue; // assume this function is external to the project being scanned
 
-    if (I.getUses() > 0 && !reportFunctions)
+    const auto uses = I.getUses();
+
+    if (uses && !reportFunctions)
         continue; // a used function that does not need to be reported
 
     const auto &reportDefinition = *I.Definitions.begin();
@@ -656,13 +656,13 @@ int main(int argc, const char **argv) {
         continue;
     }
 
-    if (I.getUses() == 0) {
+    if (!uses) {
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
     } else {
       assert(reportFunctions);
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
-          ": note: Function '" << I.Name << "' uses=" << I.getUses() << "\n";
+          ": note: Function '" << I.Name << "' uses=" << *uses << "\n";
     }
     for (auto &D : I.Declarations) {
       llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"

@@ -5,11 +5,11 @@
 // RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
 // RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
 // CHECK-DAG: Comparison::operator=={{.*}}uses=1
-// CHECK-DAG: Comparison::operator!={{.*}}uses=1
+// CHECK-DAG: Comparison::operator!={{.*}}uses=0
 // CHECK-DAG: Comparison::operator<{{.*}}uses=1
-// CHECK-DAG: Comparison::operator>{{.*}}uses=1
-// CHECK-DAG: Comparison::operator<={{.*}}uses=1
-// CHECK-DAG: Comparison::operator>={{.*}}uses=1
+// CHECK-DAG: Comparison::operator>{{.*}}uses=0
+// CHECK-DAG: Comparison::operator<={{.*}}uses=0
+// CHECK-DAG: Comparison::operator>={{.*}}uses=0
 
 //--- comparison-members.cc
 class Comparison {
