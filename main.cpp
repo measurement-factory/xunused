@@ -313,7 +313,7 @@ struct DefInfo {
 std::mutex Mutex;
 AllDeclarations AllDecls;
 
-bool getUSRForDecl (const Decl *D, std::string &USR) {
+bool getUSRForDecl(const Decl *D, std::string &USR) {
     const Decl *Target = D;
 
     if (const auto MD = dyn_cast<CXXMethodDecl>(D)) {
@@ -351,10 +351,12 @@ bool getUSRForDecl (const Decl *D, std::string &USR) {
                 // it's a template member function
                 if (auto *FTD = dyn_cast<FunctionTemplateDecl>(ND)) {
                     Target = FTD;
-                    break;
+                    auto candidateFD = FTD->getTemplatedDecl();
+                    if (candidateFD->getNumParams() == MD->getNumParams())
+                        break;
                 }
                 // it's a normal member function in a template class
-                if (auto *Method = dyn_cast<CXXMethodDecl>(ND)) {
+                if (auto Method = dyn_cast<CXXMethodDecl>(ND)) {
                     Target = Method;
                     break;
                 }
