@@ -315,26 +315,22 @@ AllDeclarations AllDecls;
 
 const Decl* getRootTemplateDecl(const Decl *decl) {
   if (const auto F = dyn_cast<FunctionDecl>(decl)) {
-    const Decl *current = F;
-
-    // Matches template functions or template methods inside template classes
-    if (F->isFunctionTemplateSpecialization()) {
-        if (const FunctionTemplateDecl *FTD = F->getPrimaryTemplate()) {
-            current = FTD;
-        }
-    }
-
-    if (auto *FTD = dyn_cast<FunctionTemplateDecl>(current)) {
+    if (F->isFunctionTemplateSpecialization()) { // handle template functions or template methods inside template classes
+      if (const FunctionTemplateDecl *FTD = F->getPrimaryTemplate()) {
         if (FunctionTemplateDecl *pattern = FTD->getInstantiatedFromMemberTemplate()) {
-            // Handle template methods inside template classes
-            return pattern;
+          // template method inside template classes
+          return pattern;
         }
-    } else if (auto *MD = dyn_cast<CXXMethodDecl>(current)) {
-        // Handle non-template methods inside template classes
-        if (auto pattern = MD->getInstantiatedFromMemberFunction()) {
-            return pattern;
-        }
+        return FTD; // template function
+      }
+    } else if (auto *MD = dyn_cast<CXXMethodDecl>(F)) { // handle non-template methods inside template classes
+      if (auto pattern = MD->getInstantiatedFromMemberFunction()) {
+        return pattern;
+      }
     }
+
+    if (auto *FTD = F->getDescribedFunctionTemplate())
+      return FTD; // template method inside a non-template class
   }
   return nullptr;
 }
