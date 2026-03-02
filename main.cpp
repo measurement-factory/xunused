@@ -313,64 +313,97 @@ struct DefInfo {
 std::mutex Mutex;
 AllDeclarations AllDecls;
 
-bool getUSRForDecl(const Decl *D, std::string &USR) {
-    const Decl *Target = D;
+const Decl* getRootTemplateDecl(const Decl *decl) {
+  if (const auto F = dyn_cast<FunctionDecl>(decl)) {
+    const Decl *current = F;
 
-    if (const auto MD = dyn_cast<CXXMethodDecl>(D)) {
-        // matches the template definition (SomeType<T>::find<U>())
-        // or template <typename T> template <> void SomeType<T>::find<int>()
-        if (const auto FTD = MD->getDescribedFunctionTemplate()) {
-            Target = FTD;
+    // Matches template functions or template methods inside template classes
+    if (F->isFunctionTemplateSpecialization()) {
+        if (const FunctionTemplateDecl *FTD = F->getPrimaryTemplate()) {
+            current = FTD;
         }
-        // matches a specific instantiation of a template method
-        // SomeType::find<int>() -> SomeType::find<U>() or
-        // SomeType<double>::find<int>() -> SomeType<double>::find<U>()
-        // The remaining class type (double) is stripped below (Parent class template block)
-        else if (const auto FTD = MD->getPrimaryTemplate()) {
-            Target = FTD;
-        }
-        // matches a member of a template class
-        // e.g., SomeType<int>::parse() -> SomeType<T>::parse()
-        else if (const auto Pattern = MD->getInstantiatedFromMemberFunction()) {
-            Target = Pattern;
-        }
+    }
 
-        // Handle Parent class template
-        // E.g., SomeType<int>
-        const CXXRecordDecl *Parent = MD->getParent();
-        // go further if Parent is a template
-        if (const auto *Spec = dyn_cast<ClassTemplateSpecializationDecl>(Parent)) {
-            // Jump from SomeType<int> to the generic template SomeType<T>
-            ClassTemplateDecl *PrimaryClassTemplate = Spec->getSpecializedTemplate();
-            CXXRecordDecl *ClassPattern = PrimaryClassTemplate->getTemplatedDecl();
+    if (auto *FTD = dyn_cast<FunctionTemplateDecl>(current)) {
+        if (FunctionTemplateDecl *pattern = FTD->getInstantiatedFromMemberTemplate()) {
+            // Handle template methods inside template classes
+            return pattern;
+        }
+    } else if (auto *MD = dyn_cast<CXXMethodDecl>(current)) {
+        // Handle non-template methods inside template classes
+        if (auto pattern = MD->getInstantiatedFromMemberFunction()) {
+            return pattern;
+        }
+    }
+  }
+  return nullptr;
+}
 
-            // Find the method inside the PRIMARY class pattern
-            // This is the "uninstantiated" version of the function.
-            auto Lookups = ClassPattern->lookup(MD->getDeclName());
-            for (NamedDecl *ND : Lookups) {
-                // it's a template member function
-                if (auto *FTD = dyn_cast<FunctionTemplateDecl>(ND)) {
-                    Target = FTD;
-                    auto candidateFD = FTD->getTemplatedDecl();
-                    if (candidateFD->getNumParams() == MD->getNumParams())
-                        break;
-                }
-                // it's a normal member function in a template class
-                if (auto Method = dyn_cast<CXXMethodDecl>(ND)) {
-                    Target = Method;
-                    break;
+bool isSameMethodSignature(const CXXMethodDecl *specMethod, const CXXMethodDecl *primaryMethod) {
+    // name and number of Parameters
+    if (specMethod->getDeclName() != primaryMethod->getDeclName() ||
+        specMethod->param_size() != primaryMethod->param_size()) {
+        return false;
+    }
+
+    // check const qualifiers (e.g., void f() vs void f() const)
+    if (specMethod->getMethodQualifiers() != primaryMethod->getMethodQualifiers())
+        return false;
+
+    for (auto i = 0; i < specMethod->param_size(); ++i) {
+        const auto primType = primaryMethod->getParamDecl(i)->getType();
+        if (primType->isDependentType())
+            continue;
+
+        // if types are not dependent, they must be identical
+        const auto specType = specMethod->getParamDecl(i)->getType();
+        if (!specMethod->getASTContext().hasSameType(specType, primType))
+            return false;
+    }
+    return true;
+}
+
+
+Decl *getPrimaryTemplateMethod(const Decl *decl) {
+    const auto method = dyn_cast<CXXMethodDecl>(decl);
+    if (!method)
+        return nullptr;
+
+    const auto classSpec = dyn_cast<ClassTemplateSpecializationDecl>(method->getParent());
+    if (!classSpec)
+        return nullptr; // not a specialization
+
+    // check if it's an explicit specialization (template <>)
+    if (classSpec->getSpecializationKind() == TSK_ExplicitSpecialization) {
+        // get the primary template (<T>)
+        ClassTemplateDecl *primaryClassTemp = classSpec->getSpecializedTemplate();
+
+        // get the "pattern" (the class body inside the template)
+        CXXRecordDecl *primaryRecord = primaryClassTemp->getTemplatedDecl();
+
+        // search for a method with the same name and signature
+        for (auto foundDecl : primaryRecord->lookup(method->getDeclName())) {
+            if (const auto primaryMethod = dyn_cast<CXXMethodDecl>(foundDecl)) {
+                if (isSameMethodSignature(method, primaryMethod)) {
+                    return primaryMethod;
                 }
             }
         }
-    } else if (const auto F = dyn_cast<FunctionDecl>(D)) {
-        if (F->isTemplateInstantiation())
-            Target = F->getTemplateInstantiationPattern();
     }
+    return nullptr;
+}
 
-    assert(Target);
+bool getUSRForDecl(const Decl *D, std::string &USR) {
+    auto target = D;
+    if (const auto templDecl = getPrimaryTemplateMethod(D)) // handle class specializations
+        target = templDecl;
+    else if (const auto templDecl = getRootTemplateDecl(D)) // handle function/method instantinations
+        target = templDecl;
+
+    assert(target);
 
     llvm::SmallVector<char, 128> Buff;
-    if (clang::index::generateUSRForDecl(Target, Buff)) {
+    if (clang::index::generateUSRForDecl(target, Buff)) {
         return false;
     }
     USR = std::string(Buff.data(), Buff.size());

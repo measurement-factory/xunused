@@ -1,0 +1,46 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK: Printer1::print{{.*}}uses=1
+// CHECK: Printer2::print{{.*}}is unused
+
+//--- template-class-specializations.cc
+#include <string>
+template <typename T>
+class Printer1 {
+    public:
+        void print() { }
+};
+template <>
+class Printer1<const char *> {
+    public:
+        void print() { }
+};
+
+template <typename T>
+class Printer2 {
+    public:
+        void print() { }
+};
+template <>
+class Printer2 <const char *> {
+    public:
+        void print() { }
+};
+
+int main() {
+    Printer1<const char *> printer;
+    printer.print();
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/template-class-specializations.cc",
+    "file": "TESTDIR/template-class-specializations.cc"
+  }
+]

@@ -1,0 +1,45 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK: Box::convert{{.*}}uses=1
+// CHECK: Box::convert{{.*}}is unused
+// CHECK: Box::convert{{.*}}uses=1
+
+//--- template-template-members.cc
+template <typename T>
+class Box {
+private:
+    T contents;
+public:
+    Box(T item) : contents(item) {}
+    template<class U>
+    T convert(U u) const {
+        return contents + static_cast<T>(u);
+    }
+    template<class U, class V>
+    T convert(U u, V v) const {
+        return contents + static_cast<T>(u) + static_cast<V>(v);
+    }
+    template<class U, class V, class W>
+    T convert(U u, V v, W w) const {
+        return contents + static_cast<T>(u) + static_cast<V>(v) + static_cast<W>(w);
+    }
+};
+
+int main() {
+    auto box = Box<double>(3.);
+    auto pi1 = box.convert<float>(0.14);
+    auto pi3 = box.convert<char, double, float>(0, 0.14, 0.0015);
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/template-template-members.cc",
+    "file": "TESTDIR/template-template-members.cc"
+  }
+]

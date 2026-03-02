@@ -4,9 +4,8 @@
 // RUN: split-file %s %t
 // RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
 // RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
-// CHECK-DAG: Box::convert{{.*}}uses=1
-// CHECK-DAG: Box::convert{{.*}}uses=1
-// CHECK-DAG: Box::convert{{.*}}uses=1
+// CHECK: Box::convert1{{.*}}uses=1
+// CHECK: Box::convert2{{.*}}is unused
 
 //--- template-members.cc
 template <typename T>
@@ -15,25 +14,17 @@ private:
     T contents;
 public:
     Box(T item) : contents(item) {}
-    template <typename U>
-    U convert() const {
-        return static_cast<U>(contents);
+    int convert1() const {
+        return static_cast<int>(contents);
     }
-    template <typename U, typename V>
-    U convert(V v) const {
-        return static_cast<U>(contents) + static_cast<U>(v);
-    }
-    template <typename U, typename V1, typename V2>
-    U convert(V1 v1, V2 v2) const {
-        return static_cast<U>(contents) + static_cast<U>(v1) + static_cast<U>(v2);
+    int convert2() const {
+        return static_cast<char>(contents);
     }
 };
 
 int main() {
-    Box<double> piBox1(3.14);
-    auto p1 = piBox1.convert<int>();
-    auto p2 = piBox1.convert<int>(0.0015);
-    auto p3 = piBox1.convert<int>(2.7, 'e');
+    auto box = Box<double>(3.14);
+    auto pi = box.convert1();
 }
 
 //--- compile_commands.json.in
