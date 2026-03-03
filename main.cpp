@@ -319,18 +319,18 @@ const Decl* getRootTemplateDecl(const Decl *decl) {
       if (const FunctionTemplateDecl *FTD = F->getPrimaryTemplate()) {
         if (FunctionTemplateDecl *pattern = FTD->getInstantiatedFromMemberTemplate()) {
           // template method inside template classes
-          return pattern;
+          return pattern->getCanonicalDecl();
         }
-        return FTD; // template function
+        return FTD->getCanonicalDecl(); // template function
       }
     } else if (auto *MD = dyn_cast<CXXMethodDecl>(F)) { // handle non-template methods inside template classes
       if (auto pattern = MD->getInstantiatedFromMemberFunction()) {
-        return pattern;
+        return pattern->getCanonicalDecl();
       }
     }
 
     if (auto *FTD = F->getDescribedFunctionTemplate())
-      return FTD; // template method inside a non-template class
+      return FTD->getCanonicalDecl(); // template method inside a non-template class
   }
   return nullptr;
 }
@@ -381,7 +381,7 @@ Decl *getPrimaryTemplateMethod(const Decl *decl) {
         for (auto foundDecl : primaryRecord->lookup(method->getDeclName())) {
             if (const auto primaryMethod = dyn_cast<CXXMethodDecl>(foundDecl)) {
                 if (isSameMethodSignature(method, primaryMethod)) {
-                    return primaryMethod;
+                    return primaryMethod->getCanonicalDecl();
                 }
             }
         }
