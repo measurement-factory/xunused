@@ -118,7 +118,7 @@ class ClassInfo
     void addSpecialMember(const FunctionDecl *);
 
     bool anySpecialMemberIsUsed() const {
-        return specialMethodIsUsed || incrementOperatorIsUsed || equalityOperatorIsUsed || comparisonOperatorIsUsed;
+        return specialMethodIsUsed || incrementOperatorIsUsed || equalityOperatorIsUsed || comparisonOperatorIsUsed || dereferenceOperatorIsUsed;
     }
     // whether at least one special method is used
     // (this may be a hidden method without DefInfo)
@@ -129,6 +129,8 @@ class ClassInfo
     bool equalityOperatorIsUsed = false;
     // whether at least one of the overloaded operators '>=', '<=', '<', '>', '<=>' is used
     bool comparisonOperatorIsUsed = false;
+    // whether at least one of the overloaded operators '*', '->', '->*' is used
+    bool dereferenceOperatorIsUsed = false;
 };
 
 using ClassDeclarations = std::map<std::string, ClassInfo>;
@@ -154,8 +156,6 @@ bool IsSpecialMethod(const FunctionDecl *F)
 }
 
 bool IsEqualityOperator(const clang::FunctionDecl *FD) {
-    if (!FD->isOverloadedOperator())
-        return false;
     const auto operatorKind = FD->getOverloadedOperator();
     switch (operatorKind) {
         case clang::OO_EqualEqual:       // ==
@@ -166,7 +166,7 @@ bool IsEqualityOperator(const clang::FunctionDecl *FD) {
     }
 }
 
-bool IsComparisonOpeartor(const clang::FunctionDecl *FD) {
+bool IsComparisonOperator(const clang::FunctionDecl *FD) {
     const auto operatorKind = FD->getOverloadedOperator();
     switch (operatorKind) {
         case clang::OO_Less:             // <
@@ -191,8 +191,20 @@ bool IsIncrementOperator(const clang::FunctionDecl *FD) {
     }
 }
 
+bool IsDereferenceOperator(const clang::FunctionDecl *FD) {
+    const auto operatorKind = FD->getOverloadedOperator();
+    switch (operatorKind) {
+        case clang::OO_Star:           // operator*
+        case clang::OO_Arrow:          // operator->
+        case clang::OO_ArrowStar:      // operator->*
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool IsAnySpecialFunction(const FunctionDecl *F) {
-    return IsSpecialMethod(F) || IsIncrementOperator(F) || IsEqualityOperator(F) || IsComparisonOpeartor(F);
+    return IsSpecialMethod(F) || IsIncrementOperator(F) || IsEqualityOperator(F) || IsComparisonOperator(F) || IsDereferenceOperator(F);
 }
 
 void ClassInfo::addSpecialMember(const FunctionDecl *F) {
@@ -202,8 +214,10 @@ void ClassInfo::addSpecialMember(const FunctionDecl *F) {
         incrementOperatorIsUsed = true;
     else if (IsEqualityOperator(F))
         equalityOperatorIsUsed = true;
-    else if (IsComparisonOpeartor(F))
+    else if (IsComparisonOperator(F))
         comparisonOperatorIsUsed = true;
+    else if (IsDereferenceOperator(F))
+        dereferenceOperatorIsUsed = true;
 }
 
 void HandleSpecialMember(const FunctionDecl *F, const bool used) {
