@@ -3,7 +3,7 @@
 // RUN: rm -rf %t && mkdir -p %t
 // RUN: split-file %s %t
 // RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
-// RUN: xunused --report-functions --special-members %t/compile_commands.json 2>&1 | FileCheck %s
+// RUN: xunused --report-functions --special-functions %t/compile_commands.json 2>&1 | FileCheck %s
 // CHECK: Box::convert{{.*}}uses=1
 // CHECK: Box::convert{{.*}}is unused
 // CHECK: Box::convert{{.*}}uses=1

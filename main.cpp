@@ -33,10 +33,11 @@ using DeclarationsList = std::list<AllDeclarationsIterator>;
 static llvm::cl::OptionCategory XUnusedCategory("xunused options");
 static llvm::cl::opt<bool> reportFunctions("report-functions",
         llvm::cl::desc("Report (to stdout) the number of times a candidate function was used."), llvm::cl::cat(XUnusedCategory));
-static llvm::cl::opt<bool> SpecialMembers("special-members",
-        llvm::cl::desc("If one of the special class methods in a class is used, treat all other as used."), llvm::cl::cat(XUnusedCategory));
+static llvm::cl::opt<bool> SpecialFunctions("special-functions",
+        llvm::cl::desc("If one function of a specific function group is used, treat all other functions as used."), llvm::cl::cat(XUnusedCategory));
 
 bool getUSRForDecl (const Decl *F, std::string &USR);
+bool getUSRForFirstArgumentType(const FunctionDecl *F, std::string &USR);
 
 template <class T, class Comp, class Alloc, class Predicate>
 void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
@@ -117,15 +118,15 @@ class ClassInfo
     void addSpecialMember(const FunctionDecl *);
 
     bool anySpecialMemberIsUsed() const {
-        return specialMethodIsUsed || equalityMethodIsUsed || comparisonMethodIsUsed;
+        return specialMethodIsUsed || equalityOperatorIsUsed || comparisonOperatorIsUsed;
     }
     // whether at least one special method is used
     // (this may be a hidden method without DefInfo)
     bool specialMethodIsUsed = false;
     // whether at least one of the overloaded operators '==' and '!=' is used
-    bool equalityMethodIsUsed = false;
+    bool equalityOperatorIsUsed = false;
     // whether at least one of the overloaded operators '>=', '<=', '<', '>', '<=>' is used
-    bool comparisonMethodIsUsed = false;
+    bool comparisonOperatorIsUsed = false;
 };
 
 using ClassDeclarations = std::map<std::string, ClassInfo>;
@@ -150,7 +151,7 @@ bool IsSpecialMethod(const FunctionDecl *F)
     return false;
 }
 
-bool IsEqualityMethod(const clang::FunctionDecl *FD) {
+bool IsEqualityOperator(const clang::FunctionDecl *FD) {
     if (!FD->isOverloadedOperator())
         return false;
     const auto operatorKind = FD->getOverloadedOperator();
@@ -163,9 +164,7 @@ bool IsEqualityMethod(const clang::FunctionDecl *FD) {
     }
 }
 
-bool IsComparisonMethod(const clang::FunctionDecl *FD) {
-    if (!FD->isOverloadedOperator())
-        return false;
+bool IsComparisonOpeartor(const clang::FunctionDecl *FD) {
     const auto operatorKind = FD->getOverloadedOperator();
     switch (operatorKind) {
         case clang::OO_Less:             // <
@@ -179,32 +178,35 @@ bool IsComparisonMethod(const clang::FunctionDecl *FD) {
     }
 }
 
-bool IsAnySpecialMethod(const FunctionDecl *F) {
-    return IsSpecialMethod(F) || IsEqualityMethod(F) || IsComparisonMethod(F);
+bool IsAnySpecialFunction(const FunctionDecl *F) {
+    return IsSpecialMethod(F) || IsEqualityOperator(F) || IsComparisonOpeartor(F);
 }
 
 void ClassInfo::addSpecialMember(const FunctionDecl *F) {
     if (IsSpecialMethod(F))
         specialMethodIsUsed = true;
-    else if (IsEqualityMethod(F))
-        equalityMethodIsUsed = true;
-    else if (IsComparisonMethod(F))
-        comparisonMethodIsUsed = true;
+    else if (IsEqualityOperator(F))
+        equalityOperatorIsUsed = true;
+    else if (IsComparisonOpeartor(F))
+        comparisonOperatorIsUsed = true;
 }
 
 void HandleSpecialMember(const FunctionDecl *F, const bool used) {
-    if (!IsAnySpecialMethod(F))
+    if (!IsAnySpecialFunction(F))
         return;
 
-    const auto MD = dyn_cast<CXXMethodDecl>(F);
-    if (!MD)
-        return;
-    const auto classDecl = MD->getParent();
-
-    assert(classDecl);
     std::string USR;
-    if (!getUSRForDecl(classDecl, USR))
+    if (const auto MD = dyn_cast<CXXMethodDecl>(F)) { // special class methods
+        const auto decl = MD->getParent();
+        if (!getUSRForDecl(decl, USR))
+            return;
+    }
+    // stand-alone operators, e.g., operator==(T a, T b) and operator!==(T a, T b)
+    // group these functions by the first argument's type USR
+    else if (!getUSRForFirstArgumentType(F, USR)) {
         return;
+    }
+
     auto it = ClassDecls.find(USR);
     if (it == ClassDecls.end()) {
         const auto inserted = ClassDecls.emplace(USR, ClassInfo());
@@ -279,25 +281,26 @@ struct DefInfo {
       if (classRef == ClassDecls.end())
           return std::nullopt;
 
-      if (SpecialMembers.getValue() && classRef->second.anySpecialMemberIsUsed())
+      if (SpecialFunctions.getValue() && classRef->second.anySpecialMemberIsUsed())
           return 0;
 
       return std::nullopt;
   }
 
   void addClassReference(const FunctionDecl *F) {
-    const auto *MD = dyn_cast<CXXMethodDecl>(F);
-    if (!MD)
+    if (!IsAnySpecialFunction(F))
         return;
 
-    if (!IsAnySpecialMethod(MD))
-        return;
-
-    const auto classDecl = MD->getParent();
-    assert(classDecl);
     std::string USR;
-    if (!getUSRForDecl(classDecl, USR))
+    if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
+        const auto classDecl = MD->getParent();
+        assert(classDecl);
+        if (!getUSRForDecl(classDecl, USR))
+            return;
+    } else if (!getUSRForFirstArgumentType(F, USR)) {
         return;
+    }
+
     classRef = ClassDecls.find(USR);
     assert(classRef != ClassDecls.end());
   }
@@ -387,6 +390,20 @@ Decl *getPrimaryTemplateMethod(const Decl *decl) {
         }
     }
     return nullptr;
+}
+
+bool getUSRForFirstArgumentType(const FunctionDecl *F, std::string &USR) {
+    if (F->getNumParams() > 0) {
+        const auto firstParam = F->getParamDecl(0);
+        QualType rawType = firstParam->getType();
+        const auto cleanType = rawType.getNonReferenceType().getUnqualifiedType().getCanonicalType();
+        llvm::SmallVector<char, 128> Buff;
+        if (index::generateUSRForType(cleanType, F->getASTContext(), Buff))
+            return false;
+        USR = std::string(Buff.data(), Buff.size());
+        return true;
+    }
+    return false;
 }
 
 bool getUSRForDecl(const Decl *D, std::string &USR) {
@@ -538,9 +555,9 @@ public:
       if (Result.SourceManager->isInSystemHeader(Begin))
         return;
 
+      HandleSpecialMember(F, false);
       auto *MD = dyn_cast<CXXMethodDecl>(F);
       if (MD) {
-        HandleSpecialMember(MD, false);
         if (isa<CXXDestructorDecl>(MD))
           return; // We don't see uses of destructors.
       }
