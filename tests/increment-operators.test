@@ -1,0 +1,38 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions --special-functions %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK-DAG: Increment::operator++{{.*}}uses=1
+// CHECK-DAG: Increment::operator++{{.*}}uses=0
+// CHECK-DAG: Increment::operator--{{.*}}uses=0
+// CHECK-DAG: Increment::operator--{{.*}}uses=0
+
+//--- increment-operators.cc
+class Increment {
+public:
+    Increment(int v) : x(v) {}
+
+    bool operator++() { return ++x; }
+    bool operator--() { return --x; }
+    bool operator++(int) { return x++; }
+    bool operator--(int) { return x--; }
+
+    int x;
+};
+
+int main() {
+    Increment x(1);
+    x++;
+    return 0;
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/increment-operators.cc",
+    "file": "TESTDIR/increment-operators.cc"
+  }
+]

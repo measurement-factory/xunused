@@ -118,11 +118,13 @@ class ClassInfo
     void addSpecialMember(const FunctionDecl *);
 
     bool anySpecialMemberIsUsed() const {
-        return specialMethodIsUsed || equalityOperatorIsUsed || comparisonOperatorIsUsed;
+        return specialMethodIsUsed || incrementOperatorIsUsed || equalityOperatorIsUsed || comparisonOperatorIsUsed;
     }
     // whether at least one special method is used
     // (this may be a hidden method without DefInfo)
     bool specialMethodIsUsed = false;
+    // whether at least one of the overloaded operators '++' and '--' (prefix postfix forms), is used
+    bool incrementOperatorIsUsed = false;
     // whether at least one of the overloaded operators '==' and '!=' is used
     bool equalityOperatorIsUsed = false;
     // whether at least one of the overloaded operators '>=', '<=', '<', '>', '<=>' is used
@@ -178,13 +180,26 @@ bool IsComparisonOpeartor(const clang::FunctionDecl *FD) {
     }
 }
 
+bool IsIncrementOperator(const clang::FunctionDecl *FD) {
+    const auto operatorKind = FD->getOverloadedOperator();
+    switch (operatorKind) {
+        case clang::OO_PlusPlus:
+        case clang::OO_MinusMinus:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool IsAnySpecialFunction(const FunctionDecl *F) {
-    return IsSpecialMethod(F) || IsEqualityOperator(F) || IsComparisonOpeartor(F);
+    return IsSpecialMethod(F) || IsIncrementOperator(F) || IsEqualityOperator(F) || IsComparisonOpeartor(F);
 }
 
 void ClassInfo::addSpecialMember(const FunctionDecl *F) {
     if (IsSpecialMethod(F))
         specialMethodIsUsed = true;
+    if (IsIncrementOperator(F))
+        incrementOperatorIsUsed = true;
     else if (IsEqualityOperator(F))
         equalityOperatorIsUsed = true;
     else if (IsComparisonOpeartor(F))
