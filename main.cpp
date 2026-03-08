@@ -518,7 +518,13 @@ public:
       auto [it, success] = AllDecls.try_emplace(USR, DefInfo());
       DeclarationsList overridenList{it};
       handleOverridenMethods(F, it->second, overridenList);
-      it->second.addUses(pair.second);
+      auto adjustedUses = pair.second;
+      const auto recursiveIt = RecursiveUses.find(pair.first);
+      if (recursiveIt != RecursiveUses.end()) {
+          const auto recursiveUses = recursiveIt->second;
+          adjustedUses = (adjustedUses>recursiveUses) ? (adjustedUses-recursiveUses) : 0;
+      }
+      it->second.addUses(adjustedUses);
     }
       // llvm::errs() << "saw usage: " << F->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
@@ -547,7 +553,7 @@ public:
       }
   }
 
-  void handleUse(const ValueDecl *D, const SourceManager *SM) {
+  void handleUse(const ValueDecl *D, const SourceManager *SM, bool isRecursion = false) {
     auto *FD = dyn_cast<FunctionDecl>(D);
     if (!FD)
       return;
@@ -569,7 +575,8 @@ public:
     //llvm::errs() << " USR:" << USR;
     llvm::errs() << "\n";
 #endif
-     auto [it, success] = Uses.try_emplace(FD->getCanonicalDecl(), 1);
+     auto currentUses = isRecursion ? &RecursiveUses : &Uses;
+     auto [it, success] = currentUses->try_emplace(FD->getCanonicalDecl(), 1);
      if (!success) {
          it->second++;
      }
@@ -628,12 +635,22 @@ public:
     } else if (const auto *R = Result.Nodes.getNodeAs<CXXDeleteExpr>("cxxDeleteExpr")) {
         if (const auto opDelete = R->getOperatorDelete())
             handleUse(opDelete, Result.SourceManager);
-    }
+    } else if(const auto *CE = Result.Nodes.getNodeAs<clang::CallExpr>("callee_expr")) {
+        // handle recursive calls
+        if (const auto *caller = Result.Nodes.getNodeAs<clang::FunctionDecl>("caller")) {
+            if (const auto callee = CE->getDirectCallee()) {
+                if (callee->getCanonicalDecl() == caller->getCanonicalDecl()) {
+                    handleUse(callee, Result.SourceManager, true);
+                }
+            }
+        }
+     }
   }
 
   std::set<const FunctionDecl *> Defs;
   // value: the number of uses
   std::map<const FunctionDecl *, unsigned> Uses;
+  std::map<const FunctionDecl *, unsigned> RecursiveUses;
 };
 
 class XUnusedASTConsumer : public ASTConsumer {
@@ -647,6 +664,12 @@ public:
     Matcher.addMatcher(declRefExpr().bind("declRef"), &Handler);
     Matcher.addMatcher(memberExpr().bind("memberRef"), &Handler);
     Matcher.addMatcher(cxxConstructExpr().bind("cxxConstructExpr"), &Handler);
+    // This matcher is used for recursive call detection.
+    // It matches nested calls, e.g.:
+    // void myFunc() {   // <--- "caller" (FunctionDecl)
+    //   other();      // <--- "callee_expr" (CallExpr)
+    // }
+    Matcher.addMatcher(callExpr(hasAncestor(functionDecl().bind("caller"))).bind("callee_expr"), &Handler);
   }
 
   void HandleTranslationUnit(ASTContext &Context) override {

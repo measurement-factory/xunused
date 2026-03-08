@@ -5,6 +5,7 @@
 // RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
 // RUN: xunused --report-functions --special-functions %t/compile_commands.json 2>&1 | FileCheck %s
 // CHECK: Printer1::print{{.*}}uses=1
+// CHECK-NOT: Printer1::print{{.*}}is unused
 // CHECK: Printer2::print{{.*}}is unused
 
 //--- template-class-specializations.cc

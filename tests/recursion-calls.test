@@ -1,0 +1,35 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions --special-functions %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK-DAG: Recursion::call{{.*}}unused
+// CHECK-DAG: Call1{{.*}}uses=1
+// CHECK-DAG: Call2{{.*}}uses=1
+
+//--- recursion-calls.cc
+class Recursion {
+    public:
+        void call(int i) const { if (--i > 0) { call(i) ; call(i);  } } 
+};
+
+void Call1(int i) { if (--i > 0 ) { Call1(i); Call1(i); } }
+
+template <class T>
+void Call2(T i) { if (i--) Call2<T>(i); }
+
+int main() {
+    Call1(2);
+    Call2<int>(2);
+    return 0;
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/recursion-calls.cc",
+    "file": "TESTDIR/recursion-calls.cc"
+  }
+]
