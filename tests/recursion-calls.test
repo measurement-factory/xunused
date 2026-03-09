@@ -11,7 +11,7 @@
 //--- recursion-calls.cc
 class Recursion {
     public:
-        void call(int i) const { if (--i > 0) { call(i) ; call(i);  } } 
+        void call(int i) const { if (--i > 0) { call(i) ; call(i);  } }
 };
 
 void Call1(int i) { if (--i > 0 ) { Call1(i); Call1(i); } }
