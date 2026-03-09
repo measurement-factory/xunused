@@ -24,11 +24,14 @@ using namespace clang;
 using namespace clang::ast_matchers;
 
 class DefInfo;
+class VarInfo;
 
 using OverridenUSRs = std::unordered_set<std::string>;
 using AllDeclarations = std::map<std::string, DefInfo>;
 using AllDeclarationsIterator = AllDeclarations::iterator;
 using DeclarationsList = std::list<AllDeclarationsIterator>;
+
+using VarDeclarations = std::map<std::string, VarInfo>;
 
 static llvm::cl::OptionCategory XUnusedCategory("xunused options");
 static llvm::cl::opt<bool> reportFunctions("report-functions",
@@ -52,12 +55,14 @@ void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
 
 struct DeclLoc {
   DeclLoc() = default;
-  DeclLoc(const FunctionDecl *F, const SourceManager &SM) {
-    auto range = F->getSourceRange();
+  DeclLoc(const Decl *D, const SourceManager &SM) {
+    auto range = D->getSourceRange();
 
-    // expand to include 'template<...>' if it exists
-    if (clang::FunctionTemplateDecl *TD = F->getDescribedFunctionTemplate())
-        range = TD->getSourceRange();
+    if (const auto F = dyn_cast<FunctionDecl>(D)) {
+      // expand to include 'template<...>' if it exists
+      if (clang::FunctionTemplateDecl *TD = F->getDescribedFunctionTemplate())
+          range = TD->getSourceRange();
+    }
 
     // Resolve macros to the "File" level (where the macro is called, not
     // where it is defined). Without that Begin and End may even point
@@ -73,8 +78,8 @@ struct DeclLoc {
     // normalize paths
     llvm::sys::path::remove_dots(Filename, true);
 
-    const auto &context = F->getASTContext();
-    if (const auto RC = context.getRawCommentForDeclNoCache(F)) {
+    const auto &context = D->getASTContext();
+    if (const auto RC = context.getRawCommentForDeclNoCache(D)) {
         clang::SourceRange cRange = RC->getSourceRange();
         const auto cBegin = SM.getFileLoc(cRange.getBegin());
         const auto cEnd = SM.getFileLoc(cRange.getEnd());
@@ -342,8 +347,29 @@ struct DefInfo {
   ClassDeclarationsIterator classRef = ClassDecls.end();
 };
 
+struct VarInfo {
+    explicit VarInfo(const VarDecl *decl) : Name(decl->getQualifiedNameAsString()) {}
+
+    void addDeclarationsAndDefinitions(const VarDecl *D, const SourceManager &SM) {
+        for (const auto R: D->redecls()) {
+            if (!R->getLocation().isValid()) {
+                continue; // no physical file representation
+            }
+            Definitions.insert({R, SM});
+        }
+    }
+
+    void addUses(const unsigned uses) { Uses += uses; }
+    unsigned getUses() const { return Uses; }
+
+    size_t Uses = 0;
+    std::string Name;
+    std::unordered_set<DeclLoc, DeclLocHash> Definitions;
+};
+
 std::mutex Mutex;
 AllDeclarations AllDecls;
+VarDeclarations VarDecls;
 
 const Decl* getRootTemplateDecl(const Decl *decl) {
   if (const auto F = dyn_cast<FunctionDecl>(decl)) {
@@ -644,7 +670,30 @@ public:
                 }
             }
         }
-     }
+    } else if (const auto D = Result.Nodes.getNodeAs<VarDecl>("globalDecl")) {
+        if (Result.SourceManager->isInSystemHeader(D->getLocation()))
+            return;
+
+        std::string USR;
+        if (!getUSRForDecl(D->getCanonicalDecl(), USR))
+            return;
+
+        auto [it, success] = VarDecls.try_emplace(USR, VarInfo(D));
+        it->second.addDeclarationsAndDefinitions(D, *Result.SourceManager);
+
+    } else if (const auto D = Result.Nodes.getNodeAs<DeclRefExpr>("globalVarUsage")) {
+        const auto var = Result.Nodes.getNodeAs<VarDecl>("globalVar");
+        assert(var);
+        if (Result.SourceManager->isInSystemHeader(var->getLocation()))
+            return;
+
+        std::string USR;
+        if (!getUSRForDecl(var->getCanonicalDecl(), USR))
+            return;
+
+        auto [it, success] = VarDecls.try_emplace(USR, VarInfo(var));
+        it->second.addUses(1);
+    }
   }
 
   std::set<const FunctionDecl *> Defs;
@@ -670,6 +719,8 @@ public:
     //   other();      // <--- "callee_expr" (CallExpr)
     // }
     Matcher.addMatcher(callExpr(hasAncestor(functionDecl().bind("caller"))).bind("callee_expr"), &Handler);
+    Matcher.addMatcher(varDecl(hasGlobalStorage(), isDefinition()).bind("globalDecl"), &Handler);
+    Matcher.addMatcher(declRefExpr(to(varDecl(hasGlobalStorage()).bind("globalVar"))).bind("globalVarUsage"), &Handler);
   }
 
   void HandleTranslationUnit(ASTContext &Context) override {
@@ -788,5 +839,41 @@ int main(int argc, const char **argv) {
                    << " comment ends here\n";
       }
     }
+  }
+
+  for (auto &KV : VarDecls) {
+      VarInfo &I = KV.second;
+
+      const auto uses = I.getUses();
+
+      if (uses && !reportFunctions)
+          continue;
+
+      if (I.Definitions.empty())
+          continue;
+
+      const auto &reportDefinition = *I.Definitions.begin();
+
+      if (!uses) {
+          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
+              << " Global '" << I.Name << "' is unused\n";
+      } else {
+          assert(reportFunctions);
+          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
+              ": note: Global '" << I.Name << "' uses=" << uses << "\n";
+      }
+
+      for (auto &D : I.Definitions) {
+          llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
+              << " declared here\n";
+          llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
+              << " declaration ends here\n";
+          if (D.CommentFirstLine) {
+              llvm::errs() << D.Filename << ":" << D.CommentFirstLine << ": note:"
+                  << " comment starts here\n";
+              llvm::errs() << D.Filename << ":" << D.CommentLastLine << ": note:"
+                  << " comment ends here\n";
+          }
+      }
   }
 }
