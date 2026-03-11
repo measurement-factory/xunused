@@ -866,23 +866,19 @@ int main(int argc, const char **argv) {
       const auto &reportDefinition = *I.Definitions.begin();
 
       if (!uses) {
-          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:" <<
-              "'" << I.Name << "' is unused\n";
+          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning: '" <<
+              I.Name << "' is unused\n";
       } else {
-          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
-              ": note: '" << I.Name << "' uses=" << uses << "\n";
+          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": note: '" <<
+              I.Name << "' uses=" << uses << "\n";
       }
 
       for (auto &D : I.Definitions) {
-          llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
-              << " declared here\n";
-          llvm::errs() << D.Filename << ":" << D.LastLine << ": note:"
-              << " declaration ends here\n";
+          llvm::errs() << D.Filename << ":" << D.FirstLine << ": note: declared here\n";
+          llvm::errs() << D.Filename << ":" << D.LastLine << ": note: declaration ends here\n";
           if (D.CommentFirstLine) {
-              llvm::errs() << D.Filename << ":" << D.CommentFirstLine << ": note:"
-                  << " comment starts here\n";
-              llvm::errs() << D.Filename << ":" << D.CommentLastLine << ": note:"
-                  << " comment ends here\n";
+              llvm::errs() << D.Filename << ":" << D.CommentFirstLine << ": note: comment starts here\n";
+              llvm::errs() << D.Filename << ":" << D.CommentLastLine << ": note: comment ends here\n";
           }
       }
     }
