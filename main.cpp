@@ -34,7 +34,7 @@ using DeclarationsList = std::list<AllDeclarationsIterator>;
 using VarDeclarations = std::map<std::string, VarInfo>;
 
 static llvm::cl::OptionCategory XUnusedCategory("xunused options");
-static llvm::cl::opt<bool> reportFunctions("report-functions",
+static llvm::cl::opt<bool> ReportFunctions("report-functions",
         llvm::cl::desc("Report (to stdout) the number of times a candidate function was used."), llvm::cl::cat(XUnusedCategory));
 static llvm::cl::opt<bool> SpecialFunctions("special-functions",
         llvm::cl::desc("If one function of a specific function group is used, treat all other functions as used."), llvm::cl::cat(XUnusedCategory));
@@ -802,7 +802,7 @@ int main(int argc, const char **argv) {
 
     const auto uses = I.getUses();
 
-    if (uses && !reportFunctions)
+    if (uses && !ReportFunctions)
         continue; // a used function that does not need to be reported
 
     const auto &reportDefinition = *I.Definitions.begin();
@@ -816,7 +816,7 @@ int main(int argc, const char **argv) {
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
     } else {
-      assert(reportFunctions);
+      assert(ReportFunctions);
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
           ": note: Function '" << I.Name << "' uses=" << *uses << "\n";
     }
@@ -851,7 +851,7 @@ int main(int argc, const char **argv) {
 
       const auto uses = I.getUses();
 
-      if (uses && !reportFunctions)
+      if (uses && !ReportFunctions)
           continue;
 
       if (I.Definitions.empty())
@@ -863,7 +863,7 @@ int main(int argc, const char **argv) {
           llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:" <<
               "'" << I.Name << "' is unused\n";
       } else {
-          assert(reportFunctions);
+          assert(ReportFunctions);
           llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
               ": note: '" << I.Name << "' uses=" << uses << "\n";
       }
