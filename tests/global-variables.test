@@ -7,6 +7,9 @@
 // CHECK-DAG: globalD{{.*}}uses=1
 // CHECK-DAG: globalV{{.*}}unused
 // CHECK-DAG: Global::C{{.*}}unused
+// CHECK-NOT: globalA{{.*}}unused
+// CHECK-NOT: globalB{{.*}}unused
+// CHECK-NOT: cout{{.*}}unused
 
 //--- global-variables.cc
 #include <iostream>
@@ -14,13 +17,21 @@
 extern double globalD;
 extern double undefinedD;
 extern double globalD;
+
 int globalV = 0;
 double globalD = 0.;
 
 class Global {
     public:
+        Global(int i) : v(i) {}
         static int C;
+        int v;
 };
+
+int Func(int i) { return i + 5; }
+static auto globalA = Func(5);
+static auto globalB = Global(5);
+
 int Global::C = 0;
 
 int main() {

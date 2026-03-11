@@ -674,6 +674,11 @@ public:
         if (Result.SourceManager->isInSystemHeader(D->getLocation()))
             return;
 
+        // avoid side effects by allowing only constant initialization
+        // (i.e., values known at compilation/linkage phase)
+        if (!D->hasConstantInitialization())
+            return;
+
         std::string USR;
         if (!getUSRForDecl(D->getCanonicalDecl(), USR))
             return;
@@ -855,12 +860,12 @@ int main(int argc, const char **argv) {
       const auto &reportDefinition = *I.Definitions.begin();
 
       if (!uses) {
-          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
-              << " Global '" << I.Name << "' is unused\n";
+          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:" <<
+              "'" << I.Name << "' is unused\n";
       } else {
           assert(reportFunctions);
           llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
-              ": note: Global '" << I.Name << "' uses=" << uses << "\n";
+              ": note: '" << I.Name << "' uses=" << uses << "\n";
       }
 
       for (auto &D : I.Definitions) {
