@@ -425,15 +425,19 @@ Decl *getPrimaryTemplateMethod(const Decl *decl) {
     if (!method)
         return nullptr;
 
-    const auto classSpec = dyn_cast<ClassTemplateSpecializationDecl>(method->getParent());
-    if (!classSpec)
-        return nullptr; // not a specialization
+    const ClassTemplateDecl *primaryClassTemp = nullptr;
 
-    // check if it's an explicit specialization (template <>)
-    if (classSpec->getSpecializationKind() == TSK_ExplicitSpecialization) {
-        // get the primary template (<T>)
-        ClassTemplateDecl *primaryClassTemp = classSpec->getSpecializedTemplate();
+    if (const auto spec = dyn_cast<ClassTemplateSpecializationDecl>(method->getParent())) {
+        auto from = spec->getSpecializedTemplateOrPartial();
+        if (from.is<ClassTemplatePartialSpecializationDecl*>()) { // partial specialization
+            const auto partial = from.get<ClassTemplatePartialSpecializationDecl*>();
+            primaryClassTemp = partial->getSpecializedTemplate(); // get the primary template (<T>)
+        } else if (spec->getSpecializationKind() == TSK_ExplicitSpecialization) { // full specialization
+            primaryClassTemp = spec->getSpecializedTemplate(); // get the primary template (<T>)
+        }
+    }
 
+    if (primaryClassTemp) {
         // get the "pattern" (the class body inside the template)
         CXXRecordDecl *primaryRecord = primaryClassTemp->getTemplatedDecl();
 
