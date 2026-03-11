@@ -38,6 +38,8 @@ static llvm::cl::opt<bool> ReportFunctions("report-functions",
         llvm::cl::desc("Report (to stdout) the number of times a candidate function was used."), llvm::cl::cat(XUnusedCategory));
 static llvm::cl::opt<bool> SpecialFunctions("special-functions",
         llvm::cl::desc("If one function of a specific function group is used, treat all other functions as used."), llvm::cl::cat(XUnusedCategory));
+static llvm::cl::opt<bool> ReportGlobals("report-globals",
+        llvm::cl::desc("For each global or static variable report (to stdout) the number of usages or its unsed status"), llvm::cl::cat(XUnusedCategory));
 
 bool getUSRForDecl (const Decl *F, std::string &USR);
 bool getUSRForFirstArgumentType(const FunctionDecl *F, std::string &USR);
@@ -671,6 +673,9 @@ public:
             }
         }
     } else if (const auto D = Result.Nodes.getNodeAs<VarDecl>("globalDecl")) {
+        if (!ReportGlobals)
+            return;
+
         if (Result.SourceManager->isInSystemHeader(D->getLocation()))
             return;
 
@@ -687,6 +692,9 @@ public:
         it->second.addDeclarationsAndDefinitions(D, *Result.SourceManager);
 
     } else if (const auto D = Result.Nodes.getNodeAs<DeclRefExpr>("globalVarUsage")) {
+        if (!ReportGlobals)
+            return;
+
         const auto var = Result.Nodes.getNodeAs<VarDecl>("globalVar");
         assert(var);
         if (Result.SourceManager->isInSystemHeader(var->getLocation()))
@@ -846,13 +854,11 @@ int main(int argc, const char **argv) {
     }
   }
 
-  for (auto &KV : VarDecls) {
+  if (ReportGlobals) {
+    for (auto &KV : VarDecls) {
       VarInfo &I = KV.second;
 
       const auto uses = I.getUses();
-
-      if (uses && !ReportFunctions)
-          continue;
 
       if (I.Definitions.empty())
           continue;
@@ -863,7 +869,6 @@ int main(int argc, const char **argv) {
           llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:" <<
               "'" << I.Name << "' is unused\n";
       } else {
-          assert(ReportFunctions);
           llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
               ": note: '" << I.Name << "' uses=" << uses << "\n";
       }
@@ -880,5 +885,6 @@ int main(int argc, const char **argv) {
                   << " comment ends here\n";
           }
       }
+    }
   }
 }
