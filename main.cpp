@@ -784,16 +784,6 @@ int main(int argc, const char **argv) {
       llvm::errs() << OptionsParser.takeError() << "\n";
       return 1;
   }
-  auto &DB = OptionsParser->getCompilations();
-  // collect libraries sources for exclusion
-  std::set<std::string> librarySourceFiles;
-  for (auto &File : DB.getAllFiles()) {
-      for (const auto &Cmd : DB.getCompileCommands(File)) {
-          if (!Cmd.Output.empty() && Cmd.Output.find("_la-") != std::string::npos) {
-              librarySourceFiles.insert(File);
-          }
-      }
-  }
 
   auto Adjuster = clang::tooling::getInsertArgumentAdjuster("-fparse-all-comments");
 
@@ -818,11 +808,6 @@ int main(int argc, const char **argv) {
         continue; // a used function that does not need to be reported
 
     const auto &reportDefinition = *I.Definitions.begin();
-
-    if (librarySourceFiles.find(std::string(reportDefinition.Filename.str())) != librarySourceFiles.end()) {
-        llvm::errs() << "Skip library source: " << reportDefinition.Filename << "\n";
-        continue;
-    }
 
     if (!uses) {
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
