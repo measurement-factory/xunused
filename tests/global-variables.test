@@ -1,0 +1,51 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-globals %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK-DAG: globalD{{.*}}uses=1
+// CHECK-DAG: globalV{{.*}}unused
+// CHECK-DAG: Global::C{{.*}}unused
+// CHECK-NOT: globalA{{.*}}unused
+// CHECK-NOT: globalB{{.*}}unused
+// CHECK-NOT: cout{{.*}}unused
+
+//--- global-variables.cc
+#include <iostream>
+
+extern double globalD;
+extern double undefinedD;
+extern double globalD;
+
+int globalV = 0;
+double globalD = 0.;
+
+class Global {
+    public:
+        Global(int i) : v(i) {}
+        static int C;
+        int v;
+};
+
+int Func(int i) { return i + 5; }
+static auto globalA = Func(5);
+static auto globalB = Global(5);
+
+int Global::C = 0;
+
+int main() {
+    globalD = 0.1;
+    undefinedD = 0.1;
+    std::cout << std::endl;
+    return 0;
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/global-variables.cc",
+    "file": "TESTDIR/global-variables.cc"
+  }
+]

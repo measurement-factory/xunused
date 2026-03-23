@@ -1,0 +1,34 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions --special-functions %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK-DAG: Box::convert{{.*}}uses=1
+// CHECK-DAG: Box::convert{{.*}}unused
+
+//--- overloaded-members.cc
+class Box {
+private:
+    int contents;
+public:
+    Box(int item) : contents(item) {}
+    int convert() const { return contents; } 
+    int convert(double v) const { return static_cast<int>(v) + contents; }
+    int convert(double v, char u) const { return static_cast<int>(v) + static_cast<int>(u) + contents; }
+};
+
+int main() {
+    Box box(3);
+    auto p1 = box.convert();
+    auto p2 = box.convert(0.14, 'a');
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/overloaded-members.cc",
+    "file": "TESTDIR/overloaded-members.cc"
+  }
+]

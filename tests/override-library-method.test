@@ -1,0 +1,45 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK-DAG: MyException::MyException{{.*}}uses=1
+// CHECK-DAG: MyException1::MyException1{{.*}}unused
+// CHECK-DAG: MyException::why{{.*}}unused
+// CHECK-DAG: MyException1::why{{.*}}unused
+// CHECK-DAG: MyException1::where{{.*}}unused
+// CHECK-NOT: MyException::what
+
+//--- override-library-method.cc
+#include <iostream>
+#include <exception>
+#include <string>
+
+class MyException : public std::exception {
+public:
+    MyException(const std::string& msg) : message(msg) {}
+    const char* what() const noexcept override { return message.c_str(); }
+    virtual void where() = 0;
+    virtual void why() {}
+    std::string message;
+};
+
+class MyException1 : public MyException {
+public:
+    MyException1(const std::string& msg) : MyException(msg) {}
+    const char* what() const noexcept override { return ""; }
+    void where() override {}
+    void why() override {}
+};
+
+int main() { return 0; }
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/override-library-method.cc",
+    "file": "TESTDIR/override-library-method.cc"
+  }
+]

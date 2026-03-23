@@ -1,0 +1,47 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions --special-functions %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK-DAG: Wrapper::operator*{{.*}}uses=1
+// CHECK-DAG: Wrapper::operator->{{.*}}uses=0
+// CHECK-DAG: Wrapper::operator->*{{.*}}uses=1
+
+//--- dereference-operators.cc
+struct Target {
+    int value = 0;
+    void print() const {}
+};
+
+class Wrapper {
+private:
+    Target* ptr;
+
+public:
+    explicit Wrapper(Target* p) : ptr(p) {}
+    Target& operator*() const { return *ptr; }
+    Target* operator->() const { return ptr; }
+    template<typename T>
+    T& operator->*(T Target::*member) {
+        return ptr->*member;
+    }
+};
+
+int main() {
+    Target t;
+    Wrapper wrap(&t);
+    (*wrap).print();
+    auto Target::*pVal = &Target::value;
+    auto val = wrap->*pVal;
+    return 0;
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/dereference-operators.cc",
+    "file": "TESTDIR/dereference-operators.cc"
+  }
+]

@@ -1,0 +1,37 @@
+// This is an LLVM-style lit test that uses FileCheck.
+//
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: split-file %s %t
+// RUN: sed -e "s|TESTDIR|%t|g" %t/compile_commands.json.in > %t/compile_commands.json
+// RUN: xunused --report-functions --special-functions %t/compile_commands.json 2>&1 | FileCheck %s
+// CHECK: Box::convert1{{.*}}uses=1
+// CHECK: Box::convert2{{.*}}is unused
+
+//--- template-members.cc
+template <typename T>
+class Box {
+private:
+    T contents;
+public:
+    Box(T item) : contents(item) {}
+    int convert1() const {
+        return static_cast<int>(contents);
+    }
+    int convert2() const {
+        return static_cast<char>(contents);
+    }
+};
+
+int main() {
+    auto box = Box<double>(3.14);
+    auto pi = box.convert1();
+}
+
+//--- compile_commands.json.in
+[
+  {
+    "directory": "TESTDIR",
+    "command": "cc -c TESTDIR/template-members.cc",
+    "file": "TESTDIR/template-members.cc"
+  }
+]

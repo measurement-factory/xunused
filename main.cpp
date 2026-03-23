@@ -9,15 +9,40 @@
 #include "clang/Index/USRGeneration.h"
 #include "clang/Tooling/AllTUsExecution.h"
 #include "clang/Tooling/Tooling.h"
+#include "clang/Tooling/CommonOptionsParser.h"
+#include "clang/Tooling/CompilationDatabase.h"
 #include "llvm/Support/Signals.h"
+#include <list>
 #include <memory>
 #include <mutex>
 #include <map>
+#include <optional>
 #include <unordered_set>
 
 
 using namespace clang;
 using namespace clang::ast_matchers;
+
+class DefInfo;
+class VarInfo;
+
+using OverridenUSRs = std::unordered_set<std::string>;
+using AllDeclarations = std::map<std::string, DefInfo>;
+using AllDeclarationsIterator = AllDeclarations::iterator;
+using DeclarationsList = std::list<AllDeclarationsIterator>;
+
+using VarDeclarations = std::map<std::string, VarInfo>;
+
+static llvm::cl::OptionCategory XUnusedCategory("xunused options");
+static llvm::cl::opt<bool> ReportFunctions("report-functions",
+        llvm::cl::desc("Report (to stdout) the number of times a candidate function was used."), llvm::cl::cat(XUnusedCategory));
+static llvm::cl::opt<bool> SpecialFunctions("special-functions",
+        llvm::cl::desc("If one function of a specific function group is used, treat all other functions as used."), llvm::cl::cat(XUnusedCategory));
+static llvm::cl::opt<bool> ReportGlobals("report-globals",
+        llvm::cl::desc("For each global or static variable report (to stdout) the number of usages or its unsed status"), llvm::cl::cat(XUnusedCategory));
+
+bool getUSRForDecl (const Decl *F, std::string &USR);
+bool getUSRForFirstArgumentType(const FunctionDecl *F, std::string &USR);
 
 template <class T, class Comp, class Alloc, class Predicate>
 void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
@@ -32,12 +57,14 @@ void discard_if(std::set<T, Comp, Alloc> &c, Predicate pred) {
 
 struct DeclLoc {
   DeclLoc() = default;
-  DeclLoc(const FunctionDecl *F, const SourceManager &SM) {
-    auto range = F->getSourceRange();
+  DeclLoc(const Decl *D, const SourceManager &SM) {
+    auto range = D->getSourceRange();
 
-    // expand to include 'template<...>' if it exists
-    if (clang::FunctionTemplateDecl *TD = F->getDescribedFunctionTemplate())
-        range = TD->getSourceRange();
+    if (const auto F = dyn_cast<FunctionDecl>(D)) {
+      // expand to include 'template<...>' if it exists
+      if (clang::FunctionTemplateDecl *TD = F->getDescribedFunctionTemplate())
+          range = TD->getSourceRange();
+    }
 
     // Resolve macros to the "File" level (where the macro is called, not
     // where it is defined). Without that Begin and End may even point
@@ -53,8 +80,8 @@ struct DeclLoc {
     // normalize paths
     llvm::sys::path::remove_dots(Filename, true);
 
-    const auto &context = F->getASTContext();
-    if (const auto RC = context.getRawCommentForDeclNoCache(F)) {
+    const auto &context = D->getASTContext();
+    if (const auto RC = context.getRawCommentForDeclNoCache(D)) {
         clang::SourceRange cRange = RC->getSourceRange();
         const auto cBegin = SM.getFileLoc(cRange.getBegin());
         const auto cEnd = SM.getFileLoc(cRange.getEnd());
@@ -78,6 +105,7 @@ struct DeclLoc {
            FirstLine == other.FirstLine &&
            LastLine == other.LastLine;
   }
+
   SmallString<128> Filename;
   unsigned FirstLine = 0;
   unsigned LastLine = 0; // same as FirstLine for single-line code
@@ -86,24 +114,172 @@ struct DeclLoc {
 };
 
 struct DeclLocHash {
-    size_t operator()(const DeclLoc& fr) const {
-      return llvm::hash_combine(fr.Filename, fr.FirstLine, fr.LastLine);
-    }
+  size_t operator() (const DeclLoc& fr) const {
+    return llvm::hash_combine(fr.Filename, fr.FirstLine, fr.LastLine);
+  }
 };
+
+class ClassInfo
+{
+  public:
+    void addSpecialMember(const FunctionDecl *);
+
+    bool anySpecialMemberIsUsed() const {
+        return specialMethodIsUsed || incrementOperatorIsUsed || equalityOperatorIsUsed || comparisonOperatorIsUsed || dereferenceOperatorIsUsed;
+    }
+    // whether at least one special method is used
+    // (this may be a hidden method without DefInfo)
+    bool specialMethodIsUsed = false;
+    // whether at least one of the overloaded operators '++' and '--' (prefix postfix forms), is used
+    bool incrementOperatorIsUsed = false;
+    // whether at least one of the overloaded operators '==' and '!=' is used
+    bool equalityOperatorIsUsed = false;
+    // whether at least one of the overloaded operators '>=', '<=', '<', '>', '<=>' is used
+    bool comparisonOperatorIsUsed = false;
+    // whether at least one of the overloaded operators '*', '->', '->*' is used
+    bool dereferenceOperatorIsUsed = false;
+};
+
+using ClassDeclarations = std::map<std::string, ClassInfo>;
+using ClassDeclarationsIterator = ClassDeclarations::iterator;
+ClassDeclarations ClassDecls;
+
+bool IsSpecialMethod(const FunctionDecl *F)
+{
+    if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
+        if (const auto *constr = dyn_cast<CXXConstructorDecl>(MD)) {
+            return (constr->isCopyConstructor() || constr->isMoveConstructor());
+        }
+        if (isa<CXXDestructorDecl>(MD))
+            return true;
+
+        if (MD->isCopyAssignmentOperator())
+            return true;
+
+        if (MD->isMoveAssignmentOperator())
+            return true;
+    }
+    return false;
+}
+
+bool IsEqualityOperator(const clang::FunctionDecl *FD) {
+    const auto operatorKind = FD->getOverloadedOperator();
+    switch (operatorKind) {
+        case clang::OO_EqualEqual:       // ==
+        case clang::OO_ExclaimEqual:     // !=
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsComparisonOperator(const clang::FunctionDecl *FD) {
+    const auto operatorKind = FD->getOverloadedOperator();
+    switch (operatorKind) {
+        case clang::OO_Less:             // <
+        case clang::OO_Greater:          // >
+        case clang::OO_LessEqual:        // <=
+        case clang::OO_GreaterEqual:     // >=
+        case clang::OO_Spaceship:        // <=> (C++20)
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsIncrementOperator(const clang::FunctionDecl *FD) {
+    const auto operatorKind = FD->getOverloadedOperator();
+    switch (operatorKind) {
+        case clang::OO_PlusPlus:
+        case clang::OO_MinusMinus:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsDereferenceOperator(const clang::FunctionDecl *FD) {
+    const auto operatorKind = FD->getOverloadedOperator();
+    switch (operatorKind) {
+        case clang::OO_Star:           // operator*
+        case clang::OO_Arrow:          // operator->
+        case clang::OO_ArrowStar:      // operator->*
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsAnySpecialFunction(const FunctionDecl *F) {
+    return IsSpecialMethod(F) || IsIncrementOperator(F) || IsEqualityOperator(F) || IsComparisonOperator(F) || IsDereferenceOperator(F);
+}
+
+void ClassInfo::addSpecialMember(const FunctionDecl *F) {
+    if (IsSpecialMethod(F))
+        specialMethodIsUsed = true;
+    if (IsIncrementOperator(F))
+        incrementOperatorIsUsed = true;
+    else if (IsEqualityOperator(F))
+        equalityOperatorIsUsed = true;
+    else if (IsComparisonOperator(F))
+        comparisonOperatorIsUsed = true;
+    else if (IsDereferenceOperator(F))
+        dereferenceOperatorIsUsed = true;
+}
+
+void HandleSpecialMember(const FunctionDecl *F, const bool used) {
+    if (!IsAnySpecialFunction(F))
+        return;
+
+    std::string USR;
+    if (const auto MD = dyn_cast<CXXMethodDecl>(F)) { // special class methods
+        const auto decl = MD->getParent();
+        if (!getUSRForDecl(decl, USR))
+            return;
+    }
+    // stand-alone operators, e.g., operator==(T a, T b) and operator!==(T a, T b)
+    // group these functions by the first argument's type USR
+    else if (!getUSRForFirstArgumentType(F, USR)) {
+        return;
+    }
+
+    auto it = ClassDecls.find(USR);
+    if (it == ClassDecls.end()) {
+        const auto inserted = ClassDecls.emplace(USR, ClassInfo());
+        it = inserted.first;
+    }
+    it->second.addSpecialMember(F);
+}
+
+// Converts, e.g., SomeType<int>::print	to SomeType::print
+std::string RemoveTemplateFromMember(const FunctionDecl *F) {
+    if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
+        const CXXRecordDecl *Parent = MD->getParent();
+        if (auto *Spec = dyn_cast<ClassTemplateSpecializationDecl>(Parent)) {
+            // Get the 'T' from 'T<int>'
+            std::string ClassName = Spec->getSpecializedTemplate()->getNameAsString();
+            return ClassName + "::" + MD->getNameAsString();
+        }
+    }
+    return F->getQualifiedNameAsString();
+}
 
 struct DefInfo {
   // Use this constructor when you find a use of a never-seen-before function
-  explicit DefInfo(const size_t uses) : Uses(uses) {}
+  explicit DefInfo() {}
 
   // Use this constructor when you find a declaration or a definition of a never-seen-before function
   explicit DefInfo(const FunctionDecl * const F)
-    : Uses(0), Name(F->getQualifiedNameAsString()) {
+    : Uses(0), Name(RemoveTemplateFromMember(F)) {
+        addClassReference(F);
   }
 
   bool sawDefinition() const { return !Definitions.empty(); }
   void addDeclarationsAndDefinitions(const FunctionDecl *F, const SourceManager &SM) {
-    if (Name.empty())
-        Name = F->getQualifiedNameAsString();
+    if (Name.empty()) {
+        Name = RemoveTemplateFromMember(F);
+        addClassReference(F);
+    }
     for (const FunctionDecl *R : F->redecls()) {
       if (!R->getLocation().isValid()) {
         continue; // no physical file representation
@@ -112,23 +288,200 @@ struct DefInfo {
       ds.insert({R, SM});
     }
   }
-  size_t Uses;
+  void addUses(const unsigned uses) {
+      if (base)
+          base->addUses(uses);
+      else
+          Uses += uses;
+  }
+  void addBase(DefInfo *info) {
+      assert(info);
+      if (info != this && !base)
+          base = info;
+  }
+
+  // the number of times this function is actually used
+  // without 'special' cases
+  unsigned getRawUses() const {
+      return base ? base->getRawUses() : Uses;
+  }
+
+  // Returns the positive number of times this function is used, or
+  // 0, marking the special usage case, when the usage of one function
+  // of a group marks any function in the group as 'used', or
+  // std::nullopt for the unused function.
+  std::optional<unsigned> getUses() const {
+      if (const auto uses = getRawUses())
+          return uses;
+
+      if (classRef == ClassDecls.end())
+          return std::nullopt;
+
+      if (SpecialFunctions.getValue() && classRef->second.anySpecialMemberIsUsed())
+          return 0;
+
+      return std::nullopt;
+  }
+
+  void addClassReference(const FunctionDecl *F) {
+    if (!IsAnySpecialFunction(F))
+        return;
+
+    std::string USR;
+    if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
+        const auto classDecl = MD->getParent();
+        assert(classDecl);
+        if (!getUSRForDecl(classDecl, USR))
+            return;
+    } else if (!getUSRForFirstArgumentType(F, USR)) {
+        return;
+    }
+
+    classRef = ClassDecls.find(USR);
+    assert(classRef != ClassDecls.end());
+  }
+
+  size_t Uses = 0;
   std::string Name;
   std::unordered_set<DeclLoc, DeclLocHash> Declarations;
   std::unordered_set<DeclLoc, DeclLocHash> Definitions;
+  DefInfo *base = nullptr; // the base virtual definition
+  ClassDeclarationsIterator classRef = ClassDecls.end();
+};
+
+struct VarInfo {
+    explicit VarInfo(const VarDecl *decl) : Name(decl->getQualifiedNameAsString()) {}
+
+    void addDeclarationsAndDefinitions(const VarDecl *D, const SourceManager &SM) {
+        for (const auto R: D->redecls()) {
+            if (!R->getLocation().isValid()) {
+                continue; // no physical file representation
+            }
+            Definitions.insert({R, SM});
+        }
+    }
+
+    void addUses(const unsigned uses) { Uses += uses; }
+    unsigned getUses() const { return Uses; }
+
+    size_t Uses = 0;
+    std::string Name;
+    std::unordered_set<DeclLoc, DeclLocHash> Definitions;
 };
 
 std::mutex Mutex;
-std::map<std::string, DefInfo> AllDecls;
+AllDeclarations AllDecls;
+VarDeclarations VarDecls;
 
-bool getUSRForDecl(const Decl *Decl, std::string &USR) {
-  llvm::SmallVector<char, 128> Buff;
+const Decl* getRootTemplateDecl(const Decl *decl) {
+  if (const auto F = dyn_cast<FunctionDecl>(decl)) {
+    if (F->isFunctionTemplateSpecialization()) { // handle template functions or template methods inside template classes
+      if (const FunctionTemplateDecl *FTD = F->getPrimaryTemplate()) {
+        if (FunctionTemplateDecl *pattern = FTD->getInstantiatedFromMemberTemplate()) {
+          // template method inside template classes
+          return pattern->getCanonicalDecl();
+        }
+        return FTD->getCanonicalDecl(); // template function
+      }
+    } else if (auto *MD = dyn_cast<CXXMethodDecl>(F)) { // handle non-template methods inside template classes
+      if (auto pattern = MD->getInstantiatedFromMemberFunction()) {
+        return pattern->getCanonicalDecl();
+      }
+    }
 
-  if (index::generateUSRForDecl(Decl, Buff))
+    if (auto *FTD = F->getDescribedFunctionTemplate())
+      return FTD->getCanonicalDecl(); // template method inside a non-template class
+  }
+  return nullptr;
+}
+
+bool isSameMethodSignature(const CXXMethodDecl *specMethod, const CXXMethodDecl *primaryMethod) {
+    // name and number of Parameters
+    if (specMethod->getDeclName() != primaryMethod->getDeclName() ||
+        specMethod->param_size() != primaryMethod->param_size()) {
+        return false;
+    }
+
+    // check const qualifiers (e.g., void f() vs void f() const)
+    if (specMethod->getMethodQualifiers() != primaryMethod->getMethodQualifiers())
+        return false;
+
+    for (auto i = 0; i < specMethod->param_size(); ++i) {
+        const auto primType = primaryMethod->getParamDecl(i)->getType();
+        if (primType->isDependentType())
+            continue;
+
+        // if types are not dependent, they must be identical
+        const auto specType = specMethod->getParamDecl(i)->getType();
+        if (!specMethod->getASTContext().hasSameType(specType, primType))
+            return false;
+    }
+    return true;
+}
+
+
+Decl *getPrimaryTemplateMethod(const Decl *decl) {
+    const auto method = dyn_cast<CXXMethodDecl>(decl);
+    if (!method)
+        return nullptr;
+
+    const ClassTemplateDecl *primaryClassTemp = nullptr;
+
+    if (const auto spec = dyn_cast<ClassTemplateSpecializationDecl>(method->getParent())) {
+        auto from = spec->getSpecializedTemplateOrPartial();
+        if (from.is<ClassTemplatePartialSpecializationDecl*>()) { // partial specialization
+            const auto partial = from.get<ClassTemplatePartialSpecializationDecl*>();
+            primaryClassTemp = partial->getSpecializedTemplate(); // get the primary template (<T>)
+        } else if (spec->getSpecializationKind() == TSK_ExplicitSpecialization) { // full specialization
+            primaryClassTemp = spec->getSpecializedTemplate(); // get the primary template (<T>)
+        }
+    }
+
+    if (primaryClassTemp) {
+        // get the "pattern" (the class body inside the template)
+        CXXRecordDecl *primaryRecord = primaryClassTemp->getTemplatedDecl();
+
+        // search for a method with the same name and signature
+        for (auto foundDecl : primaryRecord->lookup(method->getDeclName())) {
+            if (const auto primaryMethod = dyn_cast<CXXMethodDecl>(foundDecl)) {
+                if (isSameMethodSignature(method, primaryMethod)) {
+                    return primaryMethod->getCanonicalDecl();
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool getUSRForFirstArgumentType(const FunctionDecl *F, std::string &USR) {
+    if (F->getNumParams() > 0) {
+        const auto firstParam = F->getParamDecl(0);
+        QualType rawType = firstParam->getType();
+        const auto cleanType = rawType.getNonReferenceType().getUnqualifiedType().getCanonicalType();
+        llvm::SmallVector<char, 128> Buff;
+        if (index::generateUSRForType(cleanType, F->getASTContext(), Buff))
+            return false;
+        USR = std::string(Buff.data(), Buff.size());
+        return true;
+    }
     return false;
+}
 
-  USR = std::string(Buff.data(), Buff.size());
-  return true;
+bool getUSRForDecl(const Decl *D, std::string &USR) {
+    auto target = D;
+    if (const auto templDecl = getPrimaryTemplateMethod(D)) // handle class specializations
+        target = templDecl;
+    else if (const auto templDecl = getRootTemplateDecl(D)) // handle function/method instantinations
+        target = templDecl;
+
+    assert(target);
+
+    llvm::SmallVector<char, 128> Buff;
+    if (clang::index::generateUSRForDecl(target, Buff)) {
+        return false;
+    }
+    USR = std::string(Buff.data(), Buff.size());
+    return true;
 }
 
 // Whether this is a compiler-generated function, including a method of a
@@ -152,6 +505,22 @@ bool isCompilerGenerated(const FunctionDecl * const f) {
   return false;
 }
 
+// whether this method belongs to a class inherited from an external library class
+static
+bool externalBase(const FunctionDecl *F, const SourceManager &SM) {
+    const auto MD = dyn_cast<CXXMethodDecl>(F);
+    if (!MD)
+        return false;
+    for (const auto *overridden : MD->overridden_methods()) {
+        const auto parent = overridden->getParent();
+        assert(parent);
+        if (SM.isInSystemHeader(parent->getLocation()))
+            return true;
+        return externalBase(overridden, SM);
+    }
+    return false;
+}
+
 class FunctionDeclMatchHandler : public MatchFinder::MatchCallback {
 public:
   void finalize(const SourceManager &SM) {
@@ -164,9 +533,10 @@ public:
 
       const auto F = declaration->getDefinition();
       assert(F);
-      const auto it_inserted = AllDecls.emplace(std::move(USR), DefInfo(F));
-      it_inserted.first->second.addDeclarationsAndDefinitions(F, SM);
-
+      auto [it, success] = AllDecls.try_emplace(USR, DefInfo(F));
+      it->second.addDeclarationsAndDefinitions(F, SM);
+      DeclarationsList overridenList{it};
+      handleOverridenMethods(F, it->second, overridenList);
       // llvm::errs() << "saw definition: " << declaration->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
       //    " uses: " << it_inserted.first->second.Uses << "\n";
@@ -177,20 +547,50 @@ public:
       std::string USR;
       if (!getUSRForDecl(F, USR))
         continue;
-      const auto it_inserted = AllDecls.emplace(std::move(USR), pair.second);
-      if (!it_inserted.second) {
-        it_inserted.first->second.Uses += pair.second;
+      auto [it, success] = AllDecls.try_emplace(USR, DefInfo());
+      DeclarationsList overridenList{it};
+      handleOverridenMethods(F, it->second, overridenList);
+      auto adjustedUses = pair.second;
+      const auto recursiveIt = RecursiveUses.find(pair.first);
+      if (recursiveIt != RecursiveUses.end()) {
+          const auto recursiveUses = recursiveIt->second;
+          adjustedUses = (adjustedUses>recursiveUses) ? (adjustedUses-recursiveUses) : 0;
       }
+      it->second.addUses(adjustedUses);
+    }
       // llvm::errs() << "saw usage: " << F->getNameAsString() << " USR: " << it_inserted.first->first <<
       //    " definitions: " << it_inserted.first->second.Definitions <<
       //    " uses: " << it_inserted.first->second.Uses << "\n";
-    }
   }
 
-  void handleUse(const ValueDecl *D, const SourceManager *SM) {
+  void handleOverridenMethods(const FunctionDecl *F, DefInfo &info, DeclarationsList &overridenList) {
+      if (const auto *MD = dyn_cast<CXXMethodDecl>(F)) {
+          if (MD->size_overridden_methods()) {
+            for (const auto method: MD->overridden_methods()) {
+                const auto canonicalMethod = method->getCanonicalDecl();
+                std::string overridenUSR;
+                if (!getUSRForDecl(canonicalMethod, overridenUSR))
+                    continue;
+                auto [it, success] = AllDecls.try_emplace(overridenUSR, DefInfo(canonicalMethod));
+                overridenList.push_back(it);
+                handleOverridenMethods(canonicalMethod, it->second, overridenList);
+            }
+          } else {
+              if (overridenList.size() < 2)
+                  return; // already added by the caller
+              for (const auto &def : overridenList) {
+                  def->second.addBase(&info);
+              }
+          }
+      }
+  }
+
+  void handleUse(const ValueDecl *D, const SourceManager *SM, bool isRecursion = false) {
     auto *FD = dyn_cast<FunctionDecl>(D);
     if (!FD)
       return;
+
+    HandleSpecialMember(FD, true);
 
     if (isCompilerGenerated(FD))
         return;
@@ -199,51 +599,33 @@ public:
     if (SM->isInSystemHeader(FD->getSourceRange().getBegin()))
       return;
 
-    if (FD->isTemplateInstantiation()) {
-      FD = FD->getTemplateInstantiationPattern();
-      assert(FD);
-    }
-
+    if (externalBase(FD, *SM))
+        return;
 #if 0
     llvm::errs() << "Use ";
     FD->printName(llvm::errs());
     //llvm::errs() << " USR:" << USR;
     llvm::errs() << "\n";
 #endif
-     auto [it, inserted] = Uses.try_emplace(FD->getCanonicalDecl(), 1);
-     if (!inserted)
+     auto currentUses = isRecursion ? &RecursiveUses : &Uses;
+     auto [it, success] = currentUses->try_emplace(FD->getCanonicalDecl(), 1);
+     if (!success) {
          it->second++;
+     }
   }
   void run(const MatchFinder::MatchResult &Result) override {
     if (const auto *F = Result.Nodes.getNodeAs<FunctionDecl>("fnDecl")) {
+
       if (!F->hasBody())
         return; // Ignore '= delete' and '= default' definitions.
-
-      if (auto *Templ = F->getInstantiatedFromMemberFunction())
-        F = Templ;
-
-      if (F->isTemplateInstantiation()) {
-        F = F->getTemplateInstantiationPattern();
-        assert(F);
-      }
 
       auto Begin = F->getSourceRange().getBegin();
       if (Result.SourceManager->isInSystemHeader(Begin))
         return;
 
-      if (!Result.SourceManager->isWrittenInMainFile(Begin))
-        return;
-
+      HandleSpecialMember(F, false);
       auto *MD = dyn_cast<CXXMethodDecl>(F);
       if (MD) {
-        if (MD->isVirtual()
-        #if CLANG_VERSION_MAJOR >= 18
-          && !MD->isPureVirtual()
-        #else
-          && !MD->isPure()
-        #endif
-          && MD->size_overridden_methods())
-          return; // overriding method
         if (isa<CXXDestructorDecl>(MD))
           return; // We don't see uses of destructors.
       }
@@ -253,6 +635,9 @@ public:
 
       if (isCompilerGenerated(F))
         return;
+
+      if (externalBase(F, *Result.SourceManager))
+          return;
 
 #if 0
       llvm::errs() << "FunctionDecl ";
@@ -282,11 +667,56 @@ public:
     } else if (const auto *R = Result.Nodes.getNodeAs<CXXDeleteExpr>("cxxDeleteExpr")) {
         if (const auto opDelete = R->getOperatorDelete())
             handleUse(opDelete, Result.SourceManager);
+    } else if(const auto *CE = Result.Nodes.getNodeAs<clang::CallExpr>("callee_expr")) {
+        // handle recursive calls
+        if (const auto *caller = Result.Nodes.getNodeAs<clang::FunctionDecl>("caller")) {
+            if (const auto callee = CE->getDirectCallee()) {
+                if (callee->getCanonicalDecl() == caller->getCanonicalDecl()) {
+                    handleUse(callee, Result.SourceManager, true);
+                }
+            }
+        }
+    } else if (const auto D = Result.Nodes.getNodeAs<VarDecl>("globalDecl")) {
+        if (!ReportGlobals)
+            return;
+
+        if (Result.SourceManager->isInSystemHeader(D->getLocation()))
+            return;
+
+        // avoid side effects by allowing only constant initialization
+        // (i.e., values known at compilation/linkage phase)
+        if (!D->hasConstantInitialization())
+            return;
+
+        std::string USR;
+        if (!getUSRForDecl(D->getCanonicalDecl(), USR))
+            return;
+
+        auto [it, success] = VarDecls.try_emplace(USR, VarInfo(D));
+        it->second.addDeclarationsAndDefinitions(D, *Result.SourceManager);
+
+    } else if (const auto D = Result.Nodes.getNodeAs<DeclRefExpr>("globalVarUsage")) {
+        if (!ReportGlobals)
+            return;
+
+        const auto var = Result.Nodes.getNodeAs<VarDecl>("globalVar");
+        assert(var);
+        if (Result.SourceManager->isInSystemHeader(var->getLocation()))
+            return;
+
+        std::string USR;
+        if (!getUSRForDecl(var->getCanonicalDecl(), USR))
+            return;
+
+        auto [it, success] = VarDecls.try_emplace(USR, VarInfo(var));
+        it->second.addUses(1);
     }
   }
 
   std::set<const FunctionDecl *> Defs;
+  // value: the number of uses
   std::map<const FunctionDecl *, unsigned> Uses;
+  std::map<const FunctionDecl *, unsigned> RecursiveUses;
 };
 
 class XUnusedASTConsumer : public ASTConsumer {
@@ -300,6 +730,14 @@ public:
     Matcher.addMatcher(declRefExpr().bind("declRef"), &Handler);
     Matcher.addMatcher(memberExpr().bind("memberRef"), &Handler);
     Matcher.addMatcher(cxxConstructExpr().bind("cxxConstructExpr"), &Handler);
+    // This matcher is used for recursive call detection.
+    // It matches nested calls, e.g.:
+    // void myFunc() {   // <--- "caller" (FunctionDecl)
+    //   other();      // <--- "callee_expr" (CallExpr)
+    // }
+    Matcher.addMatcher(callExpr(hasAncestor(functionDecl().bind("caller"))).bind("callee_expr"), &Handler);
+    Matcher.addMatcher(varDecl(hasGlobalStorage(), isDefinition()).bind("globalDecl"), &Handler);
+    Matcher.addMatcher(declRefExpr(to(varDecl(hasGlobalStorage()).bind("globalVar"))).bind("globalVarUsage"), &Handler);
   }
 
   void HandleTranslationUnit(ASTContext &Context) override {
@@ -334,15 +772,17 @@ int main(int argc, const char **argv) {
   )";
 
   tooling::ExecutorName.setInitialValue("all-TUs");
-  static llvm::cl::OptionCategory XUnusedCategory("xunused options");
-  static llvm::cl::opt<bool> reportFunctions("report-functions",
-          llvm::cl::desc("Report (to stdout) the number of times a candidate function was used."), llvm::cl::cat(XUnusedCategory));
-
   auto Executor = clang::tooling::createExecutorFromCommandLineArgs(
       argc, argv, XUnusedCategory, Overview);
   if (!Executor) {
     llvm::errs() << llvm::toString(Executor.takeError()) << "\n";
     return 1;
+  }
+
+  auto OptionsParser = clang::tooling::CommonOptionsParser::create(argc, argv, XUnusedCategory);
+  if (!OptionsParser) {
+      llvm::errs() << OptionsParser.takeError() << "\n";
+      return 1;
   }
 
   auto Adjuster = clang::tooling::getInsertArgumentAdjuster("-fparse-all-comments");
@@ -362,17 +802,20 @@ int main(int argc, const char **argv) {
     if (!I.sawDefinition())
         continue; // assume this function is external to the project being scanned
 
-    if (I.Uses > 0 && !reportFunctions)
+    const auto uses = I.getUses();
+
+    if (uses && !ReportFunctions)
         continue; // a used function that does not need to be reported
 
     const auto &reportDefinition = *I.Definitions.begin();
-    if (I.Uses == 0) {
+
+    if (!uses) {
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning:"
                    << " Function '" << I.Name << "' is unused\n";
     } else {
-      assert(reportFunctions);
+      assert(ReportFunctions);
       llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine <<
-          ": note: Function '" << I.Name << "' uses=" << I.Uses << "\n";
+          ": note: Function '" << I.Name << "' uses=" << *uses << "\n";
     }
     for (auto &D : I.Declarations) {
       llvm::errs() << D.Filename << ":" << D.FirstLine << ": note:"
@@ -396,6 +839,36 @@ int main(int argc, const char **argv) {
                      << " comment starts here\n";
         llvm::errs() << D.Filename << ":" << D.CommentLastLine << ": note:"
                    << " comment ends here\n";
+      }
+    }
+  }
+
+  if (ReportGlobals) {
+    for (auto &KV : VarDecls) {
+      VarInfo &I = KV.second;
+
+      const auto uses = I.getUses();
+
+      if (I.Definitions.empty())
+          continue;
+
+      const auto &reportDefinition = *I.Definitions.begin();
+
+      if (!uses) {
+          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": warning: '" <<
+              I.Name << "' is unused\n";
+      } else {
+          llvm::errs() << reportDefinition.Filename << ":" << reportDefinition.FirstLine << ": note: '" <<
+              I.Name << "' uses=" << uses << "\n";
+      }
+
+      for (auto &D : I.Definitions) {
+          llvm::errs() << D.Filename << ":" << D.FirstLine << ": note: declared here\n";
+          llvm::errs() << D.Filename << ":" << D.LastLine << ": note: declaration ends here\n";
+          if (D.CommentFirstLine) {
+              llvm::errs() << D.Filename << ":" << D.CommentFirstLine << ": note: comment starts here\n";
+              llvm::errs() << D.Filename << ":" << D.CommentLastLine << ": note: comment ends here\n";
+          }
       }
     }
   }
